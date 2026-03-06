@@ -1,0 +1,37 @@
+# Control Prompt Scenario v1
+# Purpose: Exact-match drift detection only, NOT a performance scenario
+# Detects semantic drift across optimizations (e.g., precision changes fp32 → bf16)
+# Must have unambiguous, deterministic answer
+
+scenario_id: "control_prompt_v1"
+
+# Arithmetic question - unambiguous, model-agnostic, deterministic
+# Answer is always "12" regardless of model variation
+prompt: "What is 144 divided by 12? Answer with only the number."
+
+# Very short - just the number
+expected_tokens: 3
+temperature: 0.0
+seed: 42
+
+# Warmup configuration
+warmup: 20  # GPU default; 10 for CPU backends
+
+# Sequential configuration
+runs: 50
+
+# Validity layer configuration
+validity:
+  min_length: 1        # Just the number
+  max_length: 10       # Allow some whitespace variation
+
+  # Control prompt uses exact-match, not similarity
+  similarity_threshold: 1.0  # Not used for control prompt
+
+  exact_match: true    # This IS the control prompt - requires exact match
+
+# Concurrent configuration
+concurrent:
+  rps: 16
+  concurrency: 32
+  num_requests: 500

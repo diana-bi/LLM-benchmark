@@ -1,0 +1,38 @@
+# Small Prompt Scenario v1
+# Purpose: Baseline latency and TTFT signal
+# Measures pure serving overhead - scheduling, KV cache init, response path
+# Typical output: ~20 tokens
+
+scenario_id: "small_prompt_v1"
+
+# Fixed prompt - never changes
+prompt: "What is the capital of Japan?"
+
+# Expected output characteristics
+expected_tokens: 20
+temperature: 0.0
+seed: 42
+
+# Warmup configuration
+warmup: 20  # GPU default; 10 for CPU backends
+
+# Sequential (correctness gate) configuration
+runs: 50
+
+# Validity layer configuration
+validity:
+  # Layer 1: Sanity checks
+  min_length: 5        # At least 5 tokens (roughly 2-3 words)
+  max_length: 150      # At most 150 tokens (~300 words)
+
+  # Layer 3: Semantic similarity (vs pinned baseline)
+  similarity_threshold: 0.92
+
+  # Layer 4: Exact match (control prompt only)
+  exact_match: false   # This is not the control prompt
+
+# Concurrent (performance measurement) configuration
+concurrent:
+  rps: 16               # Requests per second for fixed-rate testing
+  concurrency: 32       # Number of concurrent requests allowed
+  num_requests: 500     # Total requests in concurrent phase

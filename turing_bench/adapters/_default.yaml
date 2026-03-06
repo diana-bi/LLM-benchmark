@@ -1,0 +1,27 @@
+# Default adapter for OpenAI-compatible endpoints
+# Use this if no backend-specific adapter exists
+
+backend: default
+description: "Fallback for any conformant OpenAI-compatible endpoint"
+
+endpoint: /v1/chat/completions
+
+# How to extract content from SSE chunks
+# Format: JSONPath-like string to navigate the response structure
+sse_content_path: "choices[0].delta.content"
+
+# What signals the end of the stream
+done_signal: "[DONE]"
+
+# How to identify empty deltas (to skip)
+empty_delta_check: 'content == "" or content missing'
+
+# Hardware type - affects warmup defaults
+hardware_type: gpu
+warmup_default: 20
+
+# Timeout for individual requests (seconds)
+request_timeout: 30
+
+# Timeout for entire stream (seconds)
+stream_timeout: 60

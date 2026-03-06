@@ -1,0 +1,30 @@
+# llama.cpp adapter configuration
+# Handles SSE format differences for llama.cpp server endpoint
+
+backend: llama_cpp
+description: "llama.cpp server with OpenAI-compatible /v1/chat/completions"
+
+endpoint: /v1/chat/completions
+
+# llama.cpp sends content in the same format as vLLM when using /v1/chat/completions
+sse_content_path: "choices[0].delta.content"
+
+# Termination signal
+done_signal: "[DONE]"
+
+# Empty delta detection
+empty_delta_check: 'content == "" or content missing'
+
+# Hardware type - affects warmup defaults
+hardware_type: cpu  # llama.cpp is typically CPU-based, but can be GPU
+warmup_default: 10  # Lower warmup for CPU backends
+
+# Timeout settings
+request_timeout: 30
+stream_timeout: 60
+
+# Additional llama.cpp-specific settings
+model: "default"
+n_threads: 8  # CPU threads (can be overridden)
+context_size: 2048
+gpu_layers: 99  # Layers to offload to GPU (0 = CPU only)

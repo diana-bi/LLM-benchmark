@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  llama-cpp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: turing-llama-cpp
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount models directory - download your GGUF model here
+      - ./models:/models
+      # Optional: mount a results directory for baseline outputs
+      - ./baselines:/app/baselines
+    environment:
+      # Model filename (must exist in ./models/ volume)
+      - MODEL_FILE=qwen2.5-1.5b-instruct-q4_k_m.gguf
+      # GPU layers to offload (0 = CPU only, 99 = full GPU offload)
+      - GPU_LAYERS=0
+      # Context size
+      - CTX_SIZE=2048
+    # Uncomment for GPU support (requires nvidia-docker)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/v1/models"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Optional: lightweight Python service to run the benchmark
+  benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile.benchmark
+    container_name: turing-benchmark
+    depends_on:
+      llama-cpp:
+        condition: service_healthy
+    volumes:
+      - ./baselines:/app/baselines
+      - ./results:/app/results
+    environment:
+      - LLAMA_ENDPOINT=http://llama-cpp:8000
+    command: |
+      bash -c "echo 'Benchmark container ready. Run: docker exec turing-benchmark python -m turing_bench --endpoint http://llama-cpp:8000 --phase baseline'"
+    stdin_open: true
+    tty: true
