@@ -1,344 +1,179 @@
-# Turing Benchmark CLI - Execution Mode Selection
+# Turing Benchmark CLI - API-Level Usage
 
-The CLI provides complete control over benchmark execution through command-line flags.
+The Turing benchmark is a **deployed service testing tool**. You point it at an already-running LLM service and it validates correctness plus measures performance.
+
+## Core Concept
+
+The benchmark **always runs three internal phases**:
+
+1. **Sequential Execution** — Correctness validation gate (mandatory)
+   - One request at a time, 50 runs per scenario
+   - If validity fails: stops immediately, no performance numbers reported
+
+2. **Concurrent Workload** — Performance measurement (primary metric)
+   - Multiple concurrent requests at fixed RPS
+   - 500 requests per scenario
+   - Only runs if sequential validation passes
+
+3. **Optional Sweep** — Capacity analysis (exploratory, off by default)
+   - Gradually increases concurrency to find saturation point
+   - Run with `--sweep` flag if you want it
+   - Results reported separately, never compared to baseline
 
 ## Quick Start
 
-```bash
-# Standard benchmark (sequential + workload)
-turing-bench run --endpoint http://localhost:8000 --adapter llama_cpp
-
-# Check if endpoint is conformant
-turing-bench check --endpoint http://localhost:8000 --adapter llama_cpp
-```
-
-## Execution Modes
-
-### Sequential Only (Correctness Validation)
+### 1. Establish a Baseline (Run Once, Pin Forever)
 
 ```bash
 turing-bench run \
   --endpoint http://localhost:8000 \
   --adapter llama_cpp \
-  --mode sequential
+  --phase baseline \
+  --stack-id qwen2.5-7b_vllm_a100
 ```
 
-**When to use**:
-- Quick correctness check before performance testing
-- Debugging validity issues
-- Unit testing in CI
+This runs all 3 phases, validates correctness, measures performance, and saves results to `baselines/`.
 
-**What you get**:
-- Validity layer results (sanity, structural, semantic, exact-match)
-- Per-request latency and TTFT
-- Error detection
-
-### Workload Only (Performance Measurement)
+### 2. Measure After Optimization (Compare to Baseline)
 
 ```bash
 turing-bench run \
   --endpoint http://localhost:8000 \
   --adapter llama_cpp \
-  --mode workload
+  --phase candidate \
+  --stack-id qwen2.5-7b_vllm_a100
 ```
 
-**When to use**:
-- After sequential passes
-- Measuring performance under realistic load
-- Comparing baseline vs candidate system
+Compares against the pinned baseline. Reports improvement/regression.
 
-**What you get**:
-- Throughput metrics
-- Latency percentiles (P50, P95, P99)
-- TTFT under load
-- Error rates
+### 3. Optional: Include Capacity Analysis
 
-### Sweep Mode (Capacity Analysis)
+Add `--sweep` to explore system capacity:
 
 ```bash
 turing-bench run \
   --endpoint http://localhost:8000 \
   --adapter llama_cpp \
-  --mode sweep
+  --phase candidate \
+  --stack-id qwen2.5-7b_vllm_a100 \
+  --sweep
 ```
 
-**When to use**:
-- Deep system analysis
-- Identifying saturation point
-- Capacity planning
-- Understanding scaling behavior
+---
 
-**What you get**:
-- Per-concurrency-level metrics
-- Throughput scaling curve
-- Latency degradation curve
-- Saturation point identification
+## CLI Options
 
-### Full (Sequential + Workload) — **Recommended Default**
+### Required Options
 
+| Option | Purpose | Example |
+|--------|---------|---------|
+| `--endpoint` | LLM service URL | `http://localhost:8000` |
+| `--adapter` | Backend type (SSE format) | `llama_cpp`, `vllm`, `ollama`, `openvino`, `_default` |
+| `--stack-id` | Unique hardware/software identifier | `qwen2.5-7b_vllm_a100`, `qwen2.5-7b_openvino_xeon` |
+
+### Phase Selection
+
+| Option | Meaning |
+|--------|---------|
+| `--phase baseline` | Establish reference (first run, pin forever) |
+| `--phase candidate` | Measure after optimization (default if omitted) |
+
+### Optional Options
+
+| Option | Purpose | Default |
+|--------|---------|---------|
+| `--scenarios` | Run specific scenarios (space-separated) | All scenarios |
+| `--warmup-requests` | Override warmup count | From adapter config |
+| `--sweep` | Enable capacity sweep phase | Disabled |
+| `--output` | Save results to JSON file | Print to stdout |
+
+### Examples
+
+**Specific scenarios only:**
 ```bash
 turing-bench run \
   --endpoint http://localhost:8000 \
   --adapter llama_cpp \
-  --mode full
+  --phase candidate \
+  --stack-id qwen2.5-7b_vllm_a100 \
+  --scenarios small_prompt_v1 large_prompt_v1
 ```
 
-Or omit `--mode` (defaults to `full`):
-
+**Custom warmup (override adapter config):**
 ```bash
 turing-bench run \
+  --endpoint http://localhost:8000 \
+  --adapter llama_cpp \
+  --phase candidate \
+  --stack-id qwen2.5-7b_vllm_a100 \
+  --warmup-requests 5
+```
+
+**Save results to file:**
+```bash
+turing-bench run \
+  --endpoint http://localhost:8000 \
+  --adapter llama_cpp \
+  --phase candidate \
+  --stack-id qwen2.5-7b_vllm_a100 \
+  --output results_2026-03-07.json
+```
+
+---
+
+## Pre-Flight Check (Optional)
+
+Before running the full benchmark, check if your endpoint is conformant:
+
+```bash
+turing-bench check \
   --endpoint http://localhost:8000 \
   --adapter llama_cpp
 ```
 
-**When to use**: Standard benchmark run (most common)
-
-**What you get**:
-- Full correctness validation
-- Performance metrics under load
-- If sequential fails, workload is skipped
-
----
-
-## Sequential Mode Options
-
-Control how sequential validation runs:
-
-```bash
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --mode sequential \
-  --seq-warmup 10 \
-  --seq-runs 100
-```
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--seq-warmup` | From scenario config | Override warmup count |
-| `--seq-runs` | 50 | Number of measurement runs |
-
----
-
-## Workload Mode Options
-
-Control the concurrent workload test:
-
-```bash
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --mode workload \
-  --workload-rps 32 \
-  --workload-concurrency 64 \
-  --workload-requests 1000
-```
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--workload-rps` | 16 | Requests per second |
-| `--workload-concurrency` | 32 | Max in-flight requests |
-| `--workload-requests` | 500 | Total requests to send |
-
-### Examples
-
-**Heavy load (stress test)**:
-```bash
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --workload-rps 100 \
-  --workload-concurrency 128 \
-  --workload-requests 2000
-```
-
-**Light load (baseline)**:
-```bash
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --workload-rps 4 \
-  --workload-concurrency 8 \
-  --workload-requests 100
-```
-
----
-
-## Sweep Mode Options
-
-Control capacity analysis:
-
-```bash
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --mode sweep \
-  --sweep-levels 1,2,4,8,16,32 \
-  --sweep-per-level 50
-```
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--sweep-levels` | 1,2,4,8,16,32,64 | Concurrency levels to test (comma-separated) |
-| `--sweep-per-level` | 50 | Requests per level |
-
-### Examples
-
-**Fine-grained sweep (find exact saturation)**:
-```bash
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --mode sweep \
-  --sweep-levels 1,2,3,4,5,6,7,8,10,12,16,20,24,32
-```
-
-**Quick sweep (quick capacity estimate)**:
-```bash
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --mode sweep \
-  --sweep-levels 1,4,16,64
-```
-
----
-
-## Scenario Selection
-
-Run specific scenarios instead of all:
-
-```bash
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --scenarios small_prompt_v1 large_prompt_v1
-```
-
-Omit to run all 4 scenarios (small_prompt, large_prompt, long_context, control_prompt).
-
----
-
-## Output Saving
-
-Save results to JSON file:
-
-```bash
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --output results.json
-```
-
-Omit to print results to stdout.
-
----
-
-## Complete Example Workflows
-
-### Workflow 1: Standard Benchmark Run
-
-```bash
-# Correctness validation + performance measurement
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --output results.json
-```
-
-### Workflow 2: Quick Validation
-
-```bash
-# Fast correctness check only
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --mode sequential \
-  --seq-runs 10
-```
-
-### Workflow 3: Deep Performance Analysis
-
-```bash
-# Sequential validation + heavy concurrent load + capacity sweep
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --mode full
-
-# Then run sweep for capacity analysis
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --mode sweep \
-  --sweep-levels 1,2,4,8,16,32,64 \
-  --sweep-per-level 100 \
-  --output sweep_results.json
-```
-
-### Workflow 4: CI Integration
-
-```bash
-# Quick pre-commit check (sequential only)
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --mode sequential \
-  --seq-runs 5 \
-  --seq-warmup 2
-
-# Full benchmark on main branch (slow but comprehensive)
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --output ci_results.json
-```
-
-### Workflow 5: Baseline Establishment
-
-```bash
-# High-confidence baseline (many runs)
-turing-bench run \
-  --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
-  --seq-runs 100 \
-  --workload-requests 2000 \
-  --output baseline.json
-```
+Returns:
+- `✓ Endpoint is conformant` — ready to benchmark
+- `✗ Endpoint is not conformant` — endpoint has issues, fix first
 
 ---
 
 ## Understanding the Output
 
-### Sequential Results
+### Sequential Phase
 
 ```json
 {
   "sequential": {
     "small_prompt_v1": {
       "runs": 50,
+      "successful": 50,
       "errors": 0,
       "mean_ttft_ms": 45.2,
-      "mean_latency_ms": 120.5
+      "mean_latency_ms": 120.5,
+      "raw_outputs": ["...50 strings..."]
     }
   }
 }
 ```
 
-- `runs`: Number of successful measurement runs
-- `errors`: Count of failed requests (should be 0)
-- `mean_ttft_ms`: Average time to first token
-- `mean_latency_ms`: Average total latency
+- **runs**: Total measurement runs
+- **successful**: Requests that completed
+- **errors**: Failed requests (should be 0)
+- **mean_ttft_ms**: Average time to first token
+- **mean_latency_ms**: Average total latency
+- **raw_outputs**: Full outputs (used for semantic similarity check against baseline)
 
-### Workload Results
+If **errors > 0** or any validity check fails: concurrent phase is skipped.
+
+### Concurrent Workload Phase
 
 ```json
 {
   "workload": {
     "large_prompt_v1": {
       "requests": 500,
-      "errors": 2,
       "successful": 498,
+      "errors": 2,
       "mean_latency_ms": 125.3,
       "p50_latency_ms": 110.0,
       "p95_latency_ms": 180.5,
@@ -349,13 +184,13 @@ turing-bench run \
 }
 ```
 
-- `requests`: Total requests sent
-- `errors`: Failed requests
-- `successful`: Completed requests
-- `p50_latency_ms`, `p95_latency_ms`, `p99_latency_ms`: Latency percentiles
-- `mean_ttft_ms`: Average time to first token under load
+- **requests**: Total requests sent
+- **successful**: Completed requests
+- **errors**: Failed requests
+- **p50/p95/p99**: Latency percentiles (50th, 95th, 99th percentile)
+- **mean_ttft_ms**: Average time to first token under load
 
-### Sweep Results
+### Sweep Phase (Optional)
 
 ```json
 {
@@ -396,45 +231,190 @@ turing-bench run \
 ```
 
 Look for the concurrency level where:
-- Throughput stops increasing significantly
-- Latency starts rising sharply
+- Throughput stops increasing
+- P95 latency rises sharply
 - Error rate increases
 
-That's your saturation point.
+That's your **saturation point**. For this example: saturation occurs around concurrency=32.
 
 ---
 
-## Common Scenarios
+## Typical Workflows
 
-### Scenario 1: Is my optimization safe?
-
-1. Run sequential validation:
-   ```bash
-   turing-bench run --endpoint http://localhost:8000 --adapter llama_cpp --mode sequential
-   ```
-   - Check: Do all validity checks pass?
-
-2. Run workload benchmark:
-   ```bash
-   turing-bench run --endpoint http://localhost:8000 --adapter llama_cpp --mode workload
-   ```
-   - Compare P95 latency to baseline
-   - Check: Did performance improve?
-
-### Scenario 2: What's the saturation point?
+### Workflow 1: Establish Baseline
 
 ```bash
-turing-bench run --endpoint http://localhost:8000 --adapter llama_cpp --mode sweep --output sweep.json
+# Run once, pin forever
+turing-bench run \
+  --endpoint http://localhost:8000 \
+  --adapter llama_cpp \
+  --phase baseline \
+  --stack-id qwen2.5-7b_vllm_a100 \
+  --output baselines/qwen2.5-7b_vllm_a100_baseline.json
 ```
 
-Look at the results JSON and find where throughput stops growing.
+**What happens:**
+1. Sequential runs (50 per scenario) — validates correctness
+2. Concurrent workload (500 per scenario) — measures performance
+3. Results saved to `baselines/` — **never overwritten**
 
-### Scenario 3: Did I break something?
+### Workflow 2: Measure Optimization Impact
 
 ```bash
-turing-bench run --endpoint http://localhost:8000 --adapter llama_cpp --mode sequential --seq-runs 20
+# 1. Do your optimization
+# 2. Run candidate benchmark
+turing-bench run \
+  --endpoint http://localhost:8000 \
+  --adapter llama_cpp \
+  --phase candidate \
+  --stack-id qwen2.5-7b_vllm_a100 \
+  --output results_after_optimization.json
+
+# 3. Compare results to baseline
+# The tool will load the pinned baseline and show improvement/regression
 ```
 
-If any validity check fails, you broke something.
+### Workflow 3: Capacity Planning
+
+Find system saturation point:
+
+```bash
+turing-bench run \
+  --endpoint http://localhost:8000 \
+  --adapter llama_cpp \
+  --phase baseline \
+  --stack-id qwen2.5-7b_vllm_a100 \
+  --sweep \
+  --output capacity_analysis.json
+```
+
+### Workflow 4: CI Integration
+
+Quick validation on every commit:
+
+```bash
+# Fast pre-commit check (sequential only, 10 warmup, 10 runs)
+turing-bench run \
+  --endpoint http://localhost:8000 \
+  --adapter llama_cpp \
+  --phase candidate \
+  --stack-id ci-test \
+  --warmup-requests 1 \
+  --scenarios small_prompt_v1 control_prompt_v1
+
+# Full baseline on release branches (slow but comprehensive)
+turing-bench run \
+  --endpoint http://localhost:8000 \
+  --adapter llama_cpp \
+  --phase baseline \
+  --stack-id qwen2.5-7b_vllm_a100 \
+  --output release_baseline.json
+```
+
+---
+
+## Stack ID Naming Convention
+
+`stack_id` uniquely identifies a hardware/software combination. Use:
+
+```
+{model}_{framework}_{hardware}
+```
+
+Examples:
+- `qwen2.5-7b_vllm_a100` — Qwen 2.5 7B, vLLM, A100 GPU
+- `qwen2.5-7b_vllm_rtx3090` — Qwen 2.5 7B, vLLM, RTX 3090 GPU
+- `qwen2.5-7b_openvino_xeon` — Qwen 2.5 7B, OpenVINO, Xeon CPU
+- `qwen2.5-1.5b_openvino_luna_lake` — Qwen 2.5 1.5B, OpenVINO, Luna Lake CPU
+- `deepseek-67b_vllm_2xa100` — DeepSeek 67B, vLLM, 2× A100 GPU
+
+Baselines are stored **per stack**. Never compare baselines across hardware.
+
+---
+
+## Adapter Configuration
+
+Adapters define how the benchmark parses each backend's SSE format.
+
+Built-in adapters:
+- `_default` — OpenAI-compatible baseline (works for most)
+- `llama_cpp` — llama.cpp specific format
+- `vllm` — vLLM specific format
+- `ollama` — Ollama specific format
+- `openvino` — OpenVINO specific format
+
+Adapter files live in `turing_bench/adapters/` and specify:
+- Backend SSE format differences (e.g., which JSON path contains the token)
+- RPS and concurrency defaults for this hardware type
+- Warmup defaults (GPU vs CPU)
+
+---
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Benchmark completed successfully |
+| `1` | Sequential validation failed; concurrent phase skipped |
+| `2` | Setup error (missing adapter, endpoint unreachable) |
+
+---
+
+## Troubleshooting
+
+### "Endpoint is not conformant"
+
+```
+turing-bench check --endpoint http://localhost:8000 --adapter llama_cpp
+✗ Endpoint is not conformant
+```
+
+**Fix**: Ensure the service is running and exposes `/v1/chat/completions` with streaming.
+
+### "All requests failed" in sequential phase
+
+Check:
+- Is the endpoint reachable?
+- Does it support streaming (`stream: true`)?
+- Are there timeouts or errors in the service logs?
+
+### "Sequential validation FAILED" but I want workload results anyway
+
+You can't. The sequential phase is a **mandatory correctness gate**. If it fails:
+- There's a problem with the service
+- Performance numbers aren't trustworthy
+- Fix the issue first, then re-run
+
+### High error rate in concurrent phase
+
+May indicate:
+- Service is overloaded at the configured RPS
+- Network instability
+- Service hanging on certain inputs
+
+Check service logs and try reducing RPS in adapter config.
+
+---
+
+## Advanced: Custom Adapter
+
+To support a new backend, create `turing_bench/adapters/mybackend.yaml`:
+
+```yaml
+backend: mybackend
+hardware_type: gpu  # gpu or cpu
+warmup_default: 20
+concurrent:
+  rps: 16
+  concurrency: 32
+  num_requests: 500
+sse_content_path: "choices[0].delta.content"  # JSON path to token
+done_signal: "[DONE]"
+```
+
+Then:
+```bash
+turing-bench run --endpoint http://localhost:8000 --adapter mybackend ...
+```
 
 ---
