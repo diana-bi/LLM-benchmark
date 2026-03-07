@@ -36,25 +36,28 @@ BASELINES_DIR = Path.cwd() / "baselines"
 
 @click.group()
 def cli():
-    """Turing LLM Benchmark - Service-level validation and performance testing.
+    """Turing LLM Benchmark - Universal service-level validation for any LLM.
 
-    The benchmark runs a complete test against a deployed LLM service.
-    Point it at any OpenAI-compatible endpoint and it validates correctness
-    plus measures performance.
+    One benchmark for any OpenAI-compatible LLM service:
+    - vLLM, llama.cpp, Ollama, OpenVINO, TensorRT-LLM, or custom servers
+    - Works anywhere. No backend-specific setup.
+
+    The benchmark validates correctness and measures performance against
+    a pinned baseline. Same tool for all backends.
 
     Typical workflow:
 
     \b
-    1. Establish baseline (run once, save forever):
-       turing-bench run --endpoint http://localhost:8000 --adapter llama_cpp \\
-         --phase baseline --stack-id qwen2.5-7b_vllm_a100
+    1. Establish baseline (run once, keep forever):
+       turing-bench run --endpoint http://localhost:8000 \\
+         --phase baseline --stack-id my-model-hardware
 
-    2. After optimization, measure candidate:
-       turing-bench run --endpoint http://localhost:8000 --adapter llama_cpp \\
-         --phase candidate --stack-id qwen2.5-7b_vllm_a100
+    2. After optimization, compare:
+       turing-bench run --endpoint http://localhost:8000 \\
+         --phase candidate --stack-id my-model-hardware
 
-    The benchmark compares candidate against the pinned baseline and reports
-    improvement/regression.
+    The benchmark compares candidate against baseline and reports
+    improvement/regression in performance and correctness.
     """
     pass
 
@@ -74,10 +77,10 @@ def check(endpoint: str, adapter: str):
     """Pre-flight conformance check for an endpoint.
 
     Verifies that the endpoint exposes OpenAI-compatible /v1/chat/completions
-    with streaming support.
+    with streaming support. Works with any backend.
 
     Example:
-        turing-bench check --endpoint http://localhost:8000 --adapter llama_cpp
+        turing-bench check --endpoint http://localhost:8000
     """
     click.echo(f"Checking endpoint: {endpoint}")
     click.echo(f"Adapter: {adapter}")
@@ -104,8 +107,9 @@ def check(endpoint: str, adapter: str):
 )
 @click.option(
     "--adapter",
-    required=True,
-    help="Backend adapter config (e.g., llama_cpp, vllm, ollama, openvino, _default)",
+    required=False,
+    default="_default",
+    help="Adapter config (default: _default, which works for any OpenAI-compatible endpoint)",
 )
 @click.option(
     "--phase",
@@ -152,7 +156,10 @@ def run(
     sweep: bool,
     output: Optional[str],
 ):
-    """Run Turing benchmark against an LLM service.
+    """Run Turing benchmark against any OpenAI-compatible LLM service.
+
+    Works with vLLM, llama.cpp, Ollama, OpenVINO, TensorRT-LLM, or any
+    custom server exposing /v1/chat/completions with streaming.
 
     The benchmark always executes three phases internally:
     1. Sequential execution (50 runs per scenario)
@@ -173,19 +180,19 @@ def run(
     Examples:
 
     \b
-    # Establish baseline (run once, pin forever)
-    turing-bench run --endpoint http://localhost:8000 --adapter llama_cpp \\
-      --phase baseline --stack-id qwen2.5-7b_vllm_a100
+    # Establish baseline (any backend)
+    turing-bench run --endpoint http://localhost:8000 \\
+      --phase baseline --stack-id my-model-hardware
 
     \b
     # Measure candidate after optimization
-    turing-bench run --endpoint http://localhost:8000 --adapter llama_cpp \\
-      --phase candidate --stack-id qwen2.5-7b_vllm_a100
+    turing-bench run --endpoint http://localhost:8000 \\
+      --phase candidate --stack-id my-model-hardware
 
     \b
     # Optional: include capacity analysis
-    turing-bench run --endpoint http://localhost:8000 --adapter llama_cpp \\
-      --phase candidate --stack-id qwen2.5-7b_vllm_a100 --sweep
+    turing-bench run --endpoint http://localhost:8000 \\
+      --phase candidate --stack-id my-model-hardware --sweep
     """
 
     click.echo(f"Turing LLM Benchmark")

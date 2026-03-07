@@ -1,27 +1,63 @@
-# Default adapter for OpenAI-compatible endpoints
-# Use this if no backend-specific adapter exists
+# Universal Adapter for OpenAI-Compatible Endpoints
+#
+# This is the ONLY adapter you need for any server that exposes
+# POST /v1/chat/completions with streaming support.
+#
+# The SSE parser is smart: it tries multiple content paths
+# automatically to handle format variations across backends.
+#
+# Use this adapter for:
+# - vLLM
+# - llama.cpp
+# - Ollama
+# - OpenVINO (with wrapper)
+# - TensorRT-LLM
+# - LM Studio
+# - Any custom server exposing OpenAI-compatible API
+#
+# If a new backend emerges with a fundamentally different format,
+# extend the fallback_paths list below. Do NOT create new adapters.
 
-backend: default
-description: "Fallback for any conformant OpenAI-compatible endpoint"
+backend: openai_compatible
+description: "Universal adapter for any OpenAI-compatible endpoint"
 
 endpoint: /v1/chat/completions
 
-# How to extract content from SSE chunks
-# Format: JSONPath-like string to navigate the response structure
+# Primary SSE content path (works for most servers)
 sse_content_path: "choices[0].delta.content"
+
+# Fallback paths if primary doesn't yield tokens
+# The parser tries these in order until it finds tokens
+fallback_paths:
+  - "choices[0].delta.content"      # vLLM, most servers (OpenAI format)
+  - "content"                         # llama.cpp simple format
+  - "message.content"                 # Some implementations
+  - "delta.content"                   # Alternative nesting
+  - "text"                            # Some custom servers
 
 # What signals the end of the stream
 done_signal: "[DONE]"
 
-# How to identify empty deltas (to skip)
-empty_delta_check: 'content == "" or content missing'
+# Alternative done signals (some backends use different markers)
+alternate_done_signals:
+  - "[DONE]"
+  - '{"stop": true}'
+  - '{"finish_reason": "stop"}'
+
+# Skip empty deltas (some backends send these as padding)
+skip_empty_deltas: true
 
 # Hardware type - affects warmup defaults
 hardware_type: gpu
 warmup_default: 20
 
-# Timeout for individual requests (seconds)
+# Timeouts
 request_timeout: 30
-
-# Timeout for entire stream (seconds)
 stream_timeout: 60
+
+# Concurrent workload defaults
+# Tune these per hardware, but the benchmark is portable across settings
+concurrent:
+  rps: 16              # Requests per second (fixed RPS)
+  concurrency: 32      # Max in-flight requests
+  num_requests: 500    # Total requests per scenario
