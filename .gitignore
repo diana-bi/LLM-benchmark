@@ -65,3 +65,4 @@ htmlcov/
 *_timeseries.png
 *_distribution.png
 *_candidate.json
+.claude/
