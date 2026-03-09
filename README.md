@@ -47,17 +47,15 @@ mkdir -p models
 ### 2. Run the Benchmark
 
 ```bash
-# Run baseline
-python turing_bench.py run-benchmark \
+# Run baseline (saves immutable baseline file)
+python -m turing_bench run \
   --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
   --phase baseline \
   --stack-id qwen2.5-7b_llama_cpp
 
-# Compare against baseline
-python turing_bench.py run-benchmark \
+# Compare against baseline (loads pinned baseline, compares)
+python -m turing_bench run \
   --endpoint http://localhost:8000 \
-  --adapter llama_cpp \
   --phase candidate \
   --stack-id qwen2.5-7b_llama_cpp
 ```

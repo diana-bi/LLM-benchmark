@@ -1,6 +1,6 @@
 """Layer 3: Semantic similarity - embedding-based comparison."""
 
-from typing import Tuple
+from typing import Tuple, Optional, Any
 
 
 def semantic_check(
@@ -8,6 +8,7 @@ def semantic_check(
     baseline_output: str,
     similarity_threshold: float = 0.92,
     use_embeddings: bool = True,
+    embedding_cache: Optional[Any] = None,
 ) -> Tuple[bool, str, float]:
     """
     Layer 3 semantic similarity validation.
@@ -20,6 +21,7 @@ def semantic_check(
         baseline_output: Reference baseline output
         similarity_threshold: Cosine similarity threshold (0.92 typical)
         use_embeddings: Whether to use embedding-based comparison
+        embedding_cache: Optional cached embedding model to avoid reloading
 
     Returns:
         Tuple of (passed, message, similarity_score)
@@ -32,10 +34,18 @@ def semantic_check(
         return is_exact, "Fallback to exact match", similarity
 
     try:
+        import numpy as np
         from sentence_transformers import SentenceTransformer
 
-        # Load lightweight embedding model (22MB, CPU-only)
-        model = SentenceTransformer("all-MiniLM-L6-v2")
+        # Use cached model or load it
+        if embedding_cache is not None and hasattr(embedding_cache, 'model'):
+            model = embedding_cache.model
+        else:
+            # Load lightweight embedding model (22MB, CPU-only)
+            model = SentenceTransformer("all-MiniLM-L6-v2")
+            # Cache it if we have a cache object
+            if embedding_cache is not None:
+                embedding_cache.model = model
 
         # Encode both outputs
         embeddings = model.encode([baseline_output, candidate_output])
@@ -43,8 +53,6 @@ def semantic_check(
         candidate_emb = embeddings[1]
 
         # Compute cosine similarity
-        import numpy as np
-
         similarity = float(
             np.dot(baseline_emb, candidate_emb)
             / (np.linalg.norm(baseline_emb) * np.linalg.norm(candidate_emb))

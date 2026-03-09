@@ -16,8 +16,10 @@ def exact_match_check(candidate_output: str, expected_output: str) -> Tuple[bool
 
     Returns:
         Tuple of (passed, message)
-        Note: Failure returns WARN level, not hard FAIL,
-        since hardware variation can affect determinism even at T=0
+        - True means check passed (match found)
+        - False means check failed (no match)
+        - Caller will interpret False as WARN level, not hard FAIL,
+          since hardware variation can affect determinism even at T=0
     """
 
     candidate_cleaned = candidate_output.strip()
@@ -26,8 +28,8 @@ def exact_match_check(candidate_output: str, expected_output: str) -> Tuple[bool
     if candidate_cleaned == expected_cleaned:
         return True, f"Exact match: '{expected_cleaned}'"
     else:
-        # Return as WARN, not FAIL
-        return True, (
-            f"WARN: Exact match failed. Expected: '{expected_cleaned}' "
+        # Return False for mismatch (will be WARN level by caller)
+        return False, (
+            f"Exact match failed. Expected: '{expected_cleaned}' "
             f"Got: '{candidate_cleaned}' (hardware may affect T=0 determinism)"
         )

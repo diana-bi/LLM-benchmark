@@ -13,8 +13,9 @@ and the benchmark handles the rest according to the Turing protocol.
 import asyncio
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import click
 import yaml
@@ -25,6 +26,9 @@ from .runner import (
     SweepRunner,
     check_conformance,
 )
+from .validity import ValidityLayer
+from .report.baseline import BaselineManager
+from .report.formatter import format_validity_report, format_performance_report
 
 
 # Get package root directory
@@ -251,9 +255,26 @@ def run(
     click.secho("=" * 70, fg="cyan")
     click.echo()
 
+    # Initialize validity layer and baseline manager
+    validity_layer = ValidityLayer()
+    baseline_manager = BaselineManager(str(BASELINES_DIR))
+
+    # Load baseline outputs if in candidate phase
+    baseline_data = None
+    if phase == "candidate":
+        try:
+            baseline_data = baseline_manager.load_baseline(stack_id)
+            click.echo(f"Loaded baseline: {baseline_data.get('timestamp', 'unknown')}")
+            click.echo()
+        except FileNotFoundError:
+            click.secho(f"Warning: No baseline found for {stack_id}", fg="yellow")
+            click.echo()
+
     sequential_runner = SequentialRunner(endpoint, adapter_config)
     results["sequential"] = {}
+    results["validity"] = {}
     sequential_passed = True
+    validity_passed = True
 
     for scenario_name, scenario_config in scenario_configs.items():
         click.echo(f"Running {scenario_name}...")
@@ -273,41 +294,110 @@ def run(
             if successful:
                 ttft_values = [r.ttft_ms for r in successful]
                 latency_values = [r.total_time_ms for r in successful]
+                raw_outputs = [r.output for r in successful]
+
+                # Compute metrics
+                metrics = _compute_metrics(latency_values, ttft_values)
 
                 results["sequential"][scenario_name] = {
                     "runs": len(async_results),
                     "successful": len(successful),
                     "errors": error_count,
-                    "mean_ttft_ms": sum(ttft_values) / len(ttft_values),
-                    "mean_latency_ms": sum(latency_values) / len(latency_values),
-                    "raw_outputs": [r.output for r in successful],
+                    "metrics": metrics,
+                    "raw_outputs": raw_outputs,
                 }
 
+                # ===== Validity Checking =====
+                baseline_outputs = None
+                if baseline_data:
+                    baseline_outputs = baseline_data.get("scenarios", {}).get(scenario_name, {}).get("raw_outputs")
+
+                is_valid, scenario_result, severity = _validate_sequential_results(
+                    scenario_id=scenario_name,
+                    raw_outputs=raw_outputs,
+                    baseline_outputs=baseline_outputs,
+                    scenario_config=scenario_config,
+                    validity_layer=validity_layer,
+                )
+
+                # Store validity results
+                if scenario_result:
+                    validity_data = {
+                        "passed": is_valid,
+                        "severity": severity,
+                        "checks": [],
+                    }
+                    for check in scenario_result.checks:
+                        validity_data["checks"].append({
+                            "layer": check.layer,
+                            "name": check.name,
+                            "passed": check.passed,
+                            "severity": check.severity.value,
+                            "message": check.message,
+                            "score": check.score,
+                        })
+                    results["validity"][scenario_name] = validity_data
+                else:
+                    results["validity"][scenario_name] = {"passed": False, "severity": "FAIL"}
+
+                # Update pass/fail status
+                if not is_valid and severity == "FAIL":
+                    validity_passed = False
+
+                # Display status
                 if error_count == 0:
-                    click.secho(f"  ✓ {scenario_name}: {len(async_results)} runs, no errors", fg="green")
+                    click.secho(f"  ✓ {scenario_name}: {len(async_results)} runs", fg="green")
                 else:
                     click.secho(
                         f"  ⚠ {scenario_name}: {len(async_results)} runs, {error_count} errors",
                         fg="yellow",
                     )
-                    sequential_passed = False
+
+                if not is_valid:
+                    if severity == "FAIL":
+                        click.secho(f"    ✗ Validity FAILED: {scenario_result.checks[-1].message if scenario_result.checks else 'unknown'}", fg="red")
+                    else:
+                        click.secho(f"    ⚠ Validity WARN: {scenario_result.checks[-1].message if scenario_result.checks else 'unknown'}", fg="yellow")
             else:
                 click.secho(f"  ✗ {scenario_name}: All requests failed", fg="red")
+                validity_passed = False
                 sequential_passed = False
                 results["sequential"][scenario_name] = {"error": "All requests failed"}
+                results["validity"][scenario_name] = {"passed": False, "severity": "FAIL", "message": "All requests failed"}
 
         except Exception as e:
             click.secho(f"  ✗ {scenario_name}: {e}", fg="red")
+            validity_passed = False
             sequential_passed = False
             results["sequential"][scenario_name] = {"error": str(e)}
+            results["validity"][scenario_name] = {"passed": False, "severity": "FAIL", "message": str(e)}
 
     click.echo()
 
-    if not sequential_passed:
-        click.secho("Sequential validation FAILED. Stopping before concurrent phase.", fg="red")
+    # Print validity summary
+    click.secho("VALIDITY GATE SUMMARY", fg="cyan")
+    click.secho("─" * 70, fg="cyan")
+    for scenario_name in scenario_configs.keys():
+        validity_info = results["validity"].get(scenario_name, {})
+        passed = validity_info.get("passed", False)
+        severity = validity_info.get("severity", "FAIL")
+        if passed:
+            click.secho(f"  ✓ {scenario_name:<30} PASS", fg="green")
+        elif severity == "WARN":
+            click.secho(f"  ⚠ {scenario_name:<30} WARN", fg="yellow")
+        else:
+            click.secho(f"  ✗ {scenario_name:<30} FAIL", fg="red")
+    click.echo()
+
+    if not validity_passed:
+        click.secho("VALIDITY GATE FAILED. Stopping before concurrent phase.", fg="red")
         click.echo()
         _output_results(results, output)
         sys.exit(1)
+
+    if not sequential_passed:
+        click.secho("Sequential execution had errors. Proceeding with caution.", fg="yellow")
+        click.echo()
 
     # ===========================================================================
     # PHASE 2: Concurrent Workload (Performance Measurement)
@@ -342,31 +432,21 @@ def run(
 
             if successful:
                 latencies = [r.total_time_ms for r in successful]
-                latencies_sorted = sorted(latencies)
                 ttft_values = [r.ttft_ms for r in successful]
+                metrics = _compute_metrics(latencies, ttft_values)
 
                 results["workload"][scenario_name] = {
                     "requests": len(async_results),
                     "successful": len(successful),
                     "errors": error_count,
-                    "mean_latency_ms": sum(latencies) / len(latencies),
-                    "p50_latency_ms": latencies_sorted[len(latencies_sorted) // 2],
-                    "p95_latency_ms": latencies_sorted[int(len(latencies_sorted) * 0.95)],
-                    "p99_latency_ms": latencies_sorted[int(len(latencies_sorted) * 0.99)],
-                    "mean_ttft_ms": sum(ttft_values) / len(ttft_values),
+                    "metrics": metrics,
                 }
 
+                p95 = metrics.get("p95_latency_ms", 0)
                 if error_count == 0:
-                    click.secho(
-                        f"  ✓ {scenario_name}: P95={results['workload'][scenario_name]['p95_latency_ms']:.1f}ms",
-                        fg="green",
-                    )
+                    click.secho(f"  ✓ {scenario_name}: P95={p95:.1f}ms", fg="green")
                 else:
-                    click.secho(
-                        f"  ⚠ {scenario_name}: {error_count} errors, "
-                        f"P95={results['workload'][scenario_name]['p95_latency_ms']:.1f}ms",
-                        fg="yellow",
-                    )
+                    click.secho(f"  ⚠ {scenario_name}: {error_count} errors, P95={p95:.1f}ms", fg="yellow")
             else:
                 click.secho(f"  ✗ {scenario_name}: All requests failed", fg="red")
                 results["workload"][scenario_name] = {"error": "All requests failed"}
@@ -411,6 +491,47 @@ def run(
         click.echo()
 
     # ===========================================================================
+    # ===========================================================================
+    # Baseline Pinning and Comparison
+    # ===========================================================================
+
+    # Prepare scenario results for baseline saving
+    scenario_results = {}
+    for scenario_name in scenario_configs.keys():
+        seq_data = results["sequential"].get(scenario_name, {})
+        workload_data = results["workload"].get(scenario_name, {})
+
+        scenario_results[scenario_name] = {
+            "raw_outputs": seq_data.get("raw_outputs", []),
+            "metrics": {
+                **seq_data.get("metrics", {}),
+                **workload_data.get("metrics", {}),
+            },
+            "validity": results["validity"].get(scenario_name, {}),
+        }
+
+    # Hardware metadata
+    metadata = {
+        "endpoint": endpoint,
+        "adapter": adapter,
+        "benchmark_version": "0.1.0",
+        "execution_timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+
+    # Save baseline or candidate
+    try:
+        saved_file = baseline_manager.save_baseline(
+            stack_id=stack_id,
+            phase=phase,
+            scenario_results=scenario_results,
+            metadata=metadata,
+        )
+        click.secho(f"Results saved to: {saved_file}", fg="green")
+        results["baseline_file"] = str(saved_file)
+    except Exception as e:
+        click.secho(f"Warning: Could not save baseline: {e}", fg="yellow")
+
+    # ===========================================================================
     # Summary and Output
     # ===========================================================================
     click.secho("=" * 70, fg="cyan")
@@ -418,9 +539,101 @@ def run(
     click.secho("=" * 70, fg="cyan")
     click.echo()
 
+    # Print validity summary one more time
+    click.secho("VALIDITY GATE", fg="cyan")
+    click.secho("─" * 70, fg="cyan")
+    for scenario_name in scenario_configs.keys():
+        validity_info = results["validity"].get(scenario_name, {})
+        passed = validity_info.get("passed", False)
+        severity = validity_info.get("severity", "FAIL")
+        if passed:
+            click.secho(f"  ✓ {scenario_name:<30} PASS", fg="green")
+        elif severity == "WARN":
+            click.secho(f"  ⚠ {scenario_name:<30} WARN", fg="yellow")
+        else:
+            click.secho(f"  ✗ {scenario_name:<30} FAIL", fg="red")
+    click.echo()
+
+    # Print performance summary
+    if validity_passed:
+        click.secho("PERFORMANCE METRICS", fg="cyan")
+        click.secho("─" * 70, fg="cyan")
+        for scenario_name in scenario_configs.keys():
+            workload = results["workload"].get(scenario_name, {})
+            if workload and "metrics" in workload:
+                metrics = workload["metrics"]
+                p95 = metrics.get("p95_latency_ms", 0)
+                p95_ttft = metrics.get("p95_ttft_ms", 0)
+                click.echo(f"  {scenario_name:<30} P95={p95:.1f}ms, TTFT={p95_ttft:.1f}ms")
+        click.echo()
+
     _output_results(results, output)
 
     click.secho("Done.", fg="green")
+
+
+def _compute_metrics(latencies: list, ttft_values: list = None) -> Dict[str, float]:
+    """Compute standard metrics from latency and TTFT data."""
+    if not latencies:
+        return {}
+
+    latencies_sorted = sorted(latencies)
+    metrics = {
+        "mean_latency_ms": sum(latencies) / len(latencies),
+        "p50_latency_ms": latencies_sorted[len(latencies_sorted) // 2],
+        "p95_latency_ms": latencies_sorted[int(len(latencies_sorted) * 0.95)],
+        "p99_latency_ms": latencies_sorted[int(len(latencies_sorted) * 0.99)],
+    }
+
+    if ttft_values:
+        ttft_sorted = sorted(ttft_values)
+        metrics["mean_ttft_ms"] = sum(ttft_values) / len(ttft_values)
+        metrics["p50_ttft_ms"] = ttft_sorted[len(ttft_sorted) // 2]
+        metrics["p95_ttft_ms"] = ttft_sorted[int(len(ttft_sorted) * 0.95)]
+
+    # Compute coefficient of variation for latency
+    if len(latencies) > 1:
+        mean = metrics["mean_latency_ms"]
+        variance = sum((x - mean) ** 2 for x in latencies) / len(latencies)
+        std_dev = variance ** 0.5
+        metrics["cv_percent"] = (std_dev / mean * 100) if mean > 0 else 0
+
+    return metrics
+
+
+def _validate_sequential_results(
+    scenario_id: str,
+    raw_outputs: list,
+    baseline_outputs: Optional[list],
+    scenario_config: dict,
+    validity_layer: ValidityLayer,
+) -> tuple:
+    """
+    Run validity checks on sequential results.
+
+    Returns: (is_valid, validation_result, severity)
+    """
+    if not raw_outputs:
+        return False, None, "FAIL"
+
+    validity_config = scenario_config.get("validity", {})
+    validation_result, per_output = validity_layer.validate_batch(
+        scenario_id=scenario_id,
+        outputs=raw_outputs,
+        baseline_outputs=baseline_outputs,
+        validity_config=validity_config,
+        scenario_config=scenario_config,
+    )
+
+    # Get scenario-specific result
+    scenario_result = validation_result.scenarios.get(scenario_id)
+    if not scenario_result:
+        return False, validation_result, "FAIL"
+
+    is_valid = scenario_result.overall_passed
+    severity = scenario_result.overall_severity.value
+
+    return is_valid, scenario_result, severity
 
 
 def _output_results(results: dict, output_path: Optional[str]):
