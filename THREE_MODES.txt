@@ -1,0 +1,261 @@
+TURING LLM BENCHMARK - THREE EXECUTION MODES
+═════════════════════════════════════════════════════════════════════════════
+
+1. SEQUENTIAL EXECUTION (PHASE 1: CORRECTNESS GATE)
+   ├─ Sends ONE request at a time
+   ├─ Runs 50 times per scenario
+   ├─ VALIDATES each output (4-layer validity check)
+   ├─ Isolates per-request behavior (no batching noise)
+   └─ STOPS if any validation fails (FAIL severity)
+
+   Flow:
+   Warmup (20) → Measurement (50 runs) → ValidityLayer → DECIDE
+
+   Code Location: turing_bench/runner/sequential.py
+   Result Type: SequentialRunResult
+
+   Metrics Collected:
+   ├─ TTFT (Time to First Token)
+   ├─ Total Latency
+   ├─ Per-run validity status
+   └─ Raw outputs (for baseline)
+
+═════════════════════════════════════════════════════════════════════════════
+
+2. CONCURRENT WORKLOAD (PHASE 2: PERFORMANCE MEASUREMENT)
+   ├─ Sends MULTIPLE requests simultaneously
+   ├─ Fixed RPS (requests per second) control
+   ├─ 500 total requests per scenario
+   ├─ ONLY RUNS if Phase 1 passed (validity gate)
+   └─ NO VALIDATION (already validated in Phase 1)
+
+   Flow:
+   Fixed RPS Rate Control → Send 500 requests → Collect metrics
+
+   Code Location: turing_bench/runner/concurrent.py
+   Result Type: ConcurrentRunResult
+
+   Metrics Collected:
+   ├─ P50/P95/P99 latency
+   ├─ TTFT under load
+   ├─ Coefficient of Variation (CV) - reliability
+   ├─ Drift detection (thermal throttling?)
+   ├─ Spike detection (outliers)
+   └─ Distribution analysis (fat tail?)
+
+═════════════════════════════════════════════════════════════════════════════
+
+3. CONCURRENT SWEEP (PHASE 3: OPTIONAL CAPACITY ANALYSIS)
+   ├─ Gradually INCREASES concurrency level
+   ├─ Tests: 1, 2, 4, 8, 16, 32, 64 concurrent
+   ├─ 50 requests per level
+   ├─ OPTIONAL (only if --sweep flag)
+   └─ Results NEVER compared to baseline (exploratory)
+
+   Flow:
+   Concurrency 1 → 2 → 4 → 8 → 16 → 32 → 64 → Analyze saturation
+
+   Code Location: turing_bench/runner/sweep.py
+   Result Type: SweepStageResult
+
+   Metrics Collected Per Level:
+   ├─ Average latency
+   ├─ P95 latency
+   ├─ Throughput (req/s)
+   └─ Error count
+
+═════════════════════════════════════════════════════════════════════════════
+
+WHERE METRICS ARE STORED IN CLI
+════════════════════════════════
+
+results = {
+    "validity": {
+        "small_prompt_v1": {
+            "passed": True,
+            "severity": "PASS",
+            "checks": [...]  ← Layer 1,2,3,4 details
+        }
+    },
+
+    "sequential": {
+        "small_prompt_v1": {
+            "runs": 50,
+            "metrics": {
+                "mean_ttft_ms": 45.0,
+                "p50_ttft_ms": 44.0,
+                "p95_ttft_ms": 60.0,
+                "mean_latency_ms": 120.5,
+                "p50_latency_ms": 118.0,
+                "p95_latency_ms": 180.2,
+                "p99_latency_ms": 220.5,
+                "cv_percent": 8.3,
+            },
+            "raw_outputs": [output1, output2, ..., output50]
+        }
+    },
+
+    "workload": {
+        "small_prompt_v1": {
+            "requests": 500,
+            "metrics": {
+                "mean_ttft_ms": 45.0,
+                "p95_latency_ms": 180.2,
+                "cv_percent": 8.3,
+                "p99_latency_ms": 220.5,
+            }
+        }
+    },
+
+    "sweep": {  ← Only if --sweep flag
+        "small_prompt_v1": {
+            "concurrency_1": {...},
+            "concurrency_2": {...},
+            ...
+            "concurrency_64": {...}
+        }
+    }
+}
+
+═════════════════════════════════════════════════════════════════════════════
+
+METRICS & STABILITY ANALYSIS LOCATIONS
+════════════════════════════════════════
+
+File: turing_bench/stats/
+
+├─ percentiles.py (Existing)
+│  └─ calculate_percentiles(latencies)
+│     └─ Returns: P50, P95, P99, mean, min, max
+
+├─ cv.py (Existing)
+│  └─ calculate_cv(latencies)
+│     └─ Returns: CV% (≤5% reliable, 5-10% noisy, >10% unreliable)
+
+├─ drift.py (NEW)
+│  └─ detect_drift(latencies, threshold=5%)
+│     └─ Compares first half vs second half mean
+│     └─ Detects thermal throttling, system degradation
+│     └─ Returns: drift_percent, has_drift, message
+
+├─ spike.py (NEW)
+│  └─ detect_spikes(latencies, multiplier=2.5)
+│     └─ Finds outliers > median × 2.5
+│     └─ Detects background processes, OS hiccups
+│     └─ Returns: spike_count, spike_percent, spike_indices
+
+└─ distribution.py (NEW)
+   └─ analyze_distribution(latencies)
+      └─ Analyzes P99/P95 ratio, skewness
+      └─ Detects fat tails (occasional slow requests)
+      └─ Returns: p99_p95_ratio, is_fat_tail, is_right_skewed
+
+═════════════════════════════════════════════════════════════════════════════
+
+HOW TO USE METRICS (Code Examples)
+═══════════════════════════════════
+
+# Get P50/P95/P99 from sequential results
+from turing_bench.stats.percentiles import calculate_percentiles
+
+latencies = [120.5, 118.0, 125.3, ...]  # 50 values
+percentiles = calculate_percentiles(latencies)
+# Returns: {p50: 118.0, p95: 180.2, p99: 220.5, mean: 120.5, ...}
+
+# Get CV (reliability indicator)
+from turing_bench.stats.cv import calculate_cv
+
+cv = calculate_cv(latencies)  # Returns CV as percentage
+if cv <= 5:
+    print("✓ Results reliable")
+elif cv <= 10:
+    print("⚠ Results noisy")
+else:
+    print("✗ Results unreliable")
+
+# Get drift (thermal throttling detection)
+from turing_bench.stats.drift import detect_drift
+
+drift = detect_drift(latencies)
+print(f"Drift: {drift['drift_percent']:+.1f}%")
+if drift['has_drift']:
+    print(f"⚠ {drift['message']}")
+
+# Get spikes (outlier detection)
+from turing_bench.stats.spike import detect_spikes
+
+spikes = detect_spikes(latencies)
+print(f"Spikes: {spikes['spike_count']} out of {len(latencies)}")
+if spikes['has_spikes']:
+    print(f"⚠ {spikes['message']}")
+
+# Get distribution shape (fat tail detection)
+from turing_bench.stats.distribution import analyze_distribution
+
+dist = analyze_distribution(latencies)
+print(f"P99/P95 ratio: {dist['p99_p95_ratio']:.2f}x")
+if dist['is_fat_tail']:
+    print("⚠ Fat tail detected - occasional slow requests")
+
+═════════════════════════════════════════════════════════════════════════════
+
+CONTROL FLOW (CV-Based Decision)
+
+After Sequential Phase:
+    ├─ Compute CV
+    │
+    ├─ If CV ≤ 5%
+    │  └─ GREEN: "Results reliable"
+    │     └─ Continue to Concurrent Phase
+    │
+    ├─ If 5% < CV ≤ 10%
+    │  └─ YELLOW: "Results noisy"
+    │     └─ Warn user but continue
+    │
+    └─ If CV > 10%
+       └─ RED: "Results unreliable"
+          └─ STOP or continue with warning
+          └─ Suggest: stabilize system first
+
+═════════════════════════════════════════════════════════════════════════════
+
+TEST COVERAGE FOR METRICS
+
+turing_bench/tests/
+
+├─ test_cli_integration.py (10 tests)
+│  ├─ test_compute_metrics_basic
+│  ├─ test_compute_metrics_no_ttft
+│  ├─ test_compute_metrics_cv_calculation
+│  └─ (7 more tests)
+
+├─ test_stability_analysis.py (14 tests)
+│  ├─ Drift tests (4)
+│  ├─ Spike tests (4)
+│  ├─ Distribution tests (4)
+│  └─ Integration tests (2)
+
+└─ test_validity_integration.py (8 tests)
+   └─ Validity + baseline tests
+
+Status: 32 tests PASSING
+
+═════════════════════════════════════════════════════════════════════════════
+
+WHAT'S NEXT (Enhancement)
+
+TODO: Add CV-based early stopping in CLI
+    ├─ After Phase 1: Check CV
+    ├─ If CV > 10%: STOP before Phase 2
+    └─ Recommend system stabilization
+
+TODO: Add Stability section to report output
+    ├─ Show drift, spikes, distribution
+    ├─ Show CV assessment
+    └─ Display recommendations
+
+TODO: Optional matplotlib plotting
+    ├─ Time-series latency graph
+    └─ Distribution histogram
+
+═════════════════════════════════════════════════════════════════════════════
