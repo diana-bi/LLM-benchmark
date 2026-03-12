@@ -29,7 +29,7 @@ def check_conformance_cmd(endpoint: str, timeout: float):
 
     print(f"Checking conformance for {endpoint}...\n")
 
-    is_conformant, message = check_conformance(endpoint, timeout)
+    is_conformant, message = asyncio.run(check_conformance(endpoint, timeout))
 
     print(message)
     sys.exit(0 if is_conformant else 1)

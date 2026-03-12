@@ -266,7 +266,7 @@ async def run_benchmark(
         except ValueError as e:
             click.secho(f"[ERROR] {e}", fg="red")
 
-        display_report(results)
+        # Report will be displayed at the end (line 395)
         return results
 
     # PHASE 2: Concurrent
@@ -286,6 +286,8 @@ async def run_benchmark(
             )
 
             successful = [r for r in conc_results if r.error is None]
+            total_requests = len(conc_results)
+            failed_requests = len([r for r in conc_results if r.error is not None])
 
             if successful:
                 ttft_values = [r.ttft_ms for r in successful]
@@ -299,6 +301,8 @@ async def run_benchmark(
                 if scenario_name not in results["scenarios"]:
                     results["scenarios"][scenario_name] = {}
                 results["scenarios"][scenario_name]["concurrent_metrics"] = metrics
+                results["scenarios"][scenario_name]["concurrent_request_count"] = total_requests
+                results["scenarios"][scenario_name]["concurrent_error_count"] = failed_requests
 
                 # Compare to baseline if candidate phase
                 if phase == "candidate" and baseline_data:
@@ -315,7 +319,13 @@ async def run_benchmark(
                     p95 = metrics.get("p95_latency_ms", 0)
                     click.secho(f"  PASS: P95={p95:.1f}ms", fg="green")
             else:
-                click.secho(f"  ERROR: All requests failed", fg="red")
+                # All requests failed - store error info for the report
+                if scenario_name not in results["scenarios"]:
+                    results["scenarios"][scenario_name] = {}
+                results["scenarios"][scenario_name]["concurrent_metrics"] = {}
+                results["scenarios"][scenario_name]["concurrent_request_count"] = total_requests
+                results["scenarios"][scenario_name]["concurrent_error_count"] = failed_requests
+                click.secho(f"  ERROR: All {total_requests} requests failed", fg="red")
 
         except Exception as e:
             click.secho(f"  ERROR: {e}", fg="red")
@@ -398,74 +408,107 @@ async def run_benchmark(
 
 
 def display_report(results):
-    """Display formatted report."""
-    print(f"{'=' * 70}")
-    print("REPORT")
-    print(f"{'=' * 70}")
-    print()
+    """Display formatted report with clean table layout."""
+    phase = results.get("phase", "unknown").upper()
+    stack_id = results.get("stack_id", "unknown")
+    timestamp = results.get("timestamp", "").split("T")[0] if results.get("timestamp") else "unknown"
 
-    # Validity gate summary
+    print(f"\n{'=' * 80}")
+    print(f"REPORT — {stack_id}  |  {phase}  |  {timestamp}")
+    print(f"{'=' * 80}\n")
+
+    # VALIDITY GATE
     print("VALIDITY GATE")
-    print("-" * 70)
+    print("-" * 80)
     for scenario_name, data in results["scenarios"].items():
         validity = data.get("validity", {})
         if validity.get("passed"):
-            click.secho(f"  {scenario_name:<30} PASS", fg="green")
+            click.secho(f"  {scenario_name:<40} PASS", fg="green")
         elif validity.get("severity") == "WARN":
-            click.secho(f"  {scenario_name:<30} WARN", fg="yellow")
+            click.secho(f"  {scenario_name:<40} WARN", fg="yellow")
         else:
-            click.secho(f"  {scenario_name:<30} FAIL", fg="red")
+            click.secho(f"  {scenario_name:<40} FAIL", fg="red")
     print()
 
-    # Performance summary
-    if all(data.get("validity", {}).get("passed") for data in results["scenarios"].values()):
-        print("PERFORMANCE METRICS")
-        print("-" * 70)
+    # PERFORMANCE METRICS (if at least one scenario passed validity)
+    any_valid = any(data.get("validity", {}).get("passed") for data in results["scenarios"].values())
+    if any_valid:
+        print("PERFORMANCE METRICS (concurrent phase)")
+        print("-" * 80)
+        print(f"  {'Scenario':<30} {'P95':<12} {'P99':<12} {'TTFT':<10} {'CV':<10} {'ERR':<8}")
+        print("  " + "-" * 76)
+
         for scenario_name, data in results["scenarios"].items():
-            metrics = data.get("concurrent_metrics", data.get("metrics", {}))
-            if metrics:
-                p95 = metrics.get("p95_latency_ms", 0)
-                ttft = metrics.get("p50_ttft_ms", 0)
-                cv = metrics.get("cv_percent", 0)
-                print(f"  {scenario_name:<30} P95={p95:>7.1f}ms TTFT={ttft:>6.1f}ms CV={cv:>5.1f}%")
+            concurrent_metrics = data.get("concurrent_metrics", {})
+
+            if concurrent_metrics:  # Concurrent phase succeeded
+                p95 = concurrent_metrics.get("p95_latency_ms", 0)
+                p99 = concurrent_metrics.get("p99_latency_ms", 0)
+                ttft = concurrent_metrics.get("p50_ttft_ms", 0)
+                cv = concurrent_metrics.get("cv_percent", 0)
+
+                # Count errors: total_requests - successful
+                total_req = data.get("concurrent_request_count", 500)
+                error_count = data.get("concurrent_error_count", 0)
+                error_pct = (error_count / total_req * 100) if total_req > 0 else 0.0
+
+                line = f"  {scenario_name:<30} {p95:>10.1f}ms {p99:>10.1f}ms {ttft:>8.1f}ms {cv:>8.1f}% {error_pct:>6.1f}%"
+                print(line)
+            else:  # Concurrent phase failed
+                click.secho(f"  {scenario_name:<30} FAILED (no concurrent data)", fg="red")
         print()
 
-        # Show comparison if candidate phase
+        # COMPARISON vs BASELINE (only show if candidate phase and we have comparison data)
         comparison = results.get("comparison", {})
-        if comparison:
+        if comparison and any(comparison.values()):
             print("COMPARISON vs BASELINE")
-            print("-" * 70)
+            print("-" * 80)
+            print(f"  {'Scenario':<30} {'P95 latency':<25} {'TTFT':<20} {'CV':<15}")
+            print("  " + "-" * 76)
+
             for scenario_name, metrics_comparison in comparison.items():
                 if metrics_comparison:
                     p95_change, p95_dir = metrics_comparison.get("p95_latency_ms", (0, ""))
                     ttft_change, ttft_dir = metrics_comparison.get("p95_ttft_ms", (0, ""))
                     cv_change, cv_dir = metrics_comparison.get("cv_percent", (0, ""))
 
-                    # Color code based on improvement/regression
-                    p95_color = "green" if p95_change < 0 else "red" if p95_change > 0 else "white"
-                    ttft_color = "green" if ttft_change < 0 else "red" if ttft_change > 0 else "white"
-                    cv_color = "green" if cv_change < 0 else "red" if cv_change > 0 else "white"
-
                     p95_str = f"{p95_change:+.1f}% {p95_dir}"
                     ttft_str = f"{ttft_change:+.1f}% {ttft_dir}"
                     cv_str = f"{cv_change:+.1f}% {cv_dir}"
 
-                    print(f"  {scenario_name:<20}", end="")
-                    click.secho(f" P95: {p95_str:<15}", fg=p95_color, nl=False)
-                    click.secho(f" TTFT: {ttft_str:<15}", fg=ttft_color, nl=False)
-                    click.secho(f" CV: {cv_str}", fg=cv_color)
+                    # Color code
+                    p95_color = "green" if p95_change < 0 else "red" if p95_change > 0 else "white"
+                    ttft_color = "green" if ttft_change < 0 else "red" if ttft_change > 0 else "white"
+                    cv_color = "green" if cv_change < 0 else "red" if cv_change > 0 else "white"
+
+                    # Build clean line
+                    output = f"  {scenario_name:<30} "
+                    output_parts = [output]
+
+                    # Concatenate all colored parts
+                    click.secho(output + "P95: ", fg=None, nl=False)
+                    click.secho(f"{p95_str:<21} ", fg=p95_color, nl=False)
+                    click.secho("TTFT: ", fg=None, nl=False)
+                    click.secho(f"{ttft_str:<16} ", fg=ttft_color, nl=False)
+                    click.secho("CV: ", fg=None, nl=False)
+                    click.secho(f"{cv_str}", fg=cv_color)
+                else:
+                    # Scenario in comparison but has no data (failed concurrent)
+                    print(f"  {scenario_name:<30} (no concurrent data)")
             print()
 
-    # File location
+    # FILES SAVED
     print("FILES SAVED")
-    print("-" * 70)
+    print("-" * 80)
     latest_files = sorted(BASELINES_DIR.glob(f"{results['stack_id']}*"), key=lambda x: x.stat().st_mtime, reverse=True)[:3]
     for f in latest_files:
         if results["stack_id"] in f.name:
-            click.secho(f"  {f.name}", fg="cyan")
+            marker = "← this run" if "candidate" in f.name or "baseline" in f.name else ""
+            click.secho(f"  {f.name:<50} {marker}", fg="cyan")
     print()
 
     click.secho("Benchmark complete!", fg="green")
+    print(f"{'=' * 80}\n")
 
 
 @click.command()
