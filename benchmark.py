@@ -42,6 +42,9 @@ from turing_bench.runner.concurrent import ConcurrentRunner
 from turing_bench.runner.sweep import SweepRunner
 from turing_bench.validity import ValidityLayer
 from turing_bench.report.baseline import BaselineManager
+from turing_bench.report.formatter import format_validity_report, format_performance_report
+from turing_bench.stats.percentiles import calculate_percentiles
+from turing_bench.stats.cv import calculate_cv
 
 
 SCENARIOS_DIR = Path(__file__).parent / "turing_bench" / "scenarios"
@@ -54,17 +57,14 @@ def compute_metrics(latencies):
     if not latencies:
         return {}
 
-    sorted_lat = sorted(latencies)
-    mean = sum(latencies) / len(latencies)
-    variance = sum((x - mean) ** 2 for x in latencies) / len(latencies)
-    std_dev = variance ** 0.5
-    cv = (std_dev / mean * 100) if mean > 0 else 0
+    percentiles = calculate_percentiles(latencies)
+    cv = calculate_cv(latencies)
 
     return {
-        "mean_latency_ms": mean,
-        "p50_latency_ms": sorted_lat[len(sorted_lat) // 2],
-        "p95_latency_ms": sorted_lat[int(len(sorted_lat) * 0.95)],
-        "p99_latency_ms": sorted_lat[int(len(sorted_lat) * 0.99)],
+        "mean_latency_ms": percentiles.get("mean", 0),
+        "p50_latency_ms": percentiles.get("p50", 0),
+        "p95_latency_ms": percentiles.get("p95", 0),
+        "p99_latency_ms": percentiles.get("p99", 0),
         "cv_percent": cv,
     }
 
@@ -74,11 +74,11 @@ def compute_ttft_metrics(ttft_values):
     if not ttft_values:
         return {}
 
-    sorted_ttft = sorted(ttft_values)
+    percentiles = calculate_percentiles(ttft_values)
     return {
-        "mean_ttft_ms": sum(ttft_values) / len(ttft_values),
-        "p50_ttft_ms": sorted_ttft[len(sorted_ttft) // 2],
-        "p95_ttft_ms": sorted_ttft[int(len(sorted_ttft) * 0.95)],
+        "mean_ttft_ms": percentiles.get("mean", 0),
+        "p50_ttft_ms": percentiles.get("p50", 0),
+        "p95_ttft_ms": percentiles.get("p95", 0),
     }
 
 
@@ -107,6 +107,9 @@ async def run_benchmark(
     stack_id: str,
     phase: str,
     include_sweep: bool = False,
+    fast_mode: bool = False,
+    rps_override: Optional[int] = None,
+    requests_override: Optional[int] = None,
 ):
     """Run full benchmark."""
 
@@ -118,6 +121,17 @@ async def run_benchmark(
     for scenario_file in sorted(SCENARIOS_DIR.glob("*.yaml")):
         with open(scenario_file) as f:
             scenarios[scenario_file.stem] = yaml.safe_load(f)
+
+    # Apply fast mode defaults if enabled
+    if fast_mode:
+        fast_warmup = 5
+        fast_sequential = 25
+        fast_concurrent = 100
+        for scenario_cfg in scenarios.values():
+            scenario_cfg["runs"] = scenario_cfg.get("runs", fast_sequential)
+            if "concurrent" not in scenario_cfg:
+                scenario_cfg["concurrent"] = {}
+            scenario_cfg["concurrent"]["num_requests"] = fast_concurrent
 
     # Initialize
     seq_runner = SequentialRunner(endpoint, adapter_config)
@@ -308,9 +322,10 @@ async def run_benchmark(
 
         try:
             # Read concurrent settings from scenario YAML first, adapter config as fallback
+            # CLI overrides take precedence
             scenario_concurrent = scenario_cfg.get("concurrent", {})
-            rps = scenario_concurrent.get("rps") or adapter_config.get("concurrent", {}).get("rps", 16)
-            num_requests = scenario_concurrent.get("num_requests") or adapter_config.get("concurrent", {}).get("num_requests", 500)
+            rps = rps_override if rps_override else (scenario_concurrent.get("rps") or adapter_config.get("concurrent", {}).get("rps", 16))
+            num_requests = requests_override if requests_override else (scenario_concurrent.get("num_requests") or adapter_config.get("concurrent", {}).get("num_requests", 500))
 
             conc_results = await conc_runner.run_scenario(
                 scenario_cfg,
@@ -440,6 +455,18 @@ async def run_benchmark(
     return results
 
 
+def get_cv_tier(cv_percent):
+    """Get CV stability tier label."""
+    if cv_percent < 5:
+        return "VERY STABLE"
+    elif cv_percent < 10:
+        return "STABLE"
+    elif cv_percent < 20:
+        return "ACCEPTABLE"
+    else:
+        return "HIGH VARIANCE"
+
+
 def display_report(results):
     """Display formatted report with clean table layout."""
     phase = results.get("phase", "unknown").upper()
@@ -485,11 +512,39 @@ def display_report(results):
                 error_count = data.get("concurrent_error_count", 0)
                 error_pct = (error_count / total_req * 100) if total_req > 0 else 0.0
 
+                # Color code CV based on stability tier
+                cv_tier = get_cv_tier(cv)
+                cv_color = "green" if cv < 5 else "yellow" if cv < 20 else "red"
+
                 line = f"  {scenario_name:<30} {p95:>10.1f}ms {p99:>10.1f}ms {ttft:>8.1f}ms {cv:>8.1f}% {error_pct:>6.1f}%"
                 print(line)
+
+                # Show CV tier warning if variance is high
+                if cv >= 20:
+                    click.secho(f"    └─ CV {cv_tier} ({cv_tier.lower()}): latency may be unstable under load", fg=cv_color)
             else:  # Concurrent phase failed
                 click.secho(f"  {scenario_name:<30} FAILED (no concurrent data)", fg="red")
         print()
+
+        # SWEEP RESULTS (if present)
+        has_sweep = any(data.get("sweep") for data in results["scenarios"].values())
+        if has_sweep:
+            print("CONCURRENCY SWEEP RESULTS")
+            print("-" * 80)
+            for scenario_name, data in results["scenarios"].items():
+                sweep = data.get("sweep", {})
+                if sweep:
+                    print(f"  {scenario_name}:")
+                    print(f"    {'Concurrency':<15} {'Avg Latency':<15} {'P95 Latency':<15} {'Throughput':<12}")
+                    print("    " + "-" * 57)
+                    for key in sorted(sweep.keys(), key=lambda x: int(x.split("_")[1]) if "_" in x else 0):
+                        metrics = sweep[key]
+                        concurrency = key.split("_")[1] if "_" in key else key
+                        avg_lat = metrics.get("avg_latency_ms", 0)
+                        p95_lat = metrics.get("p95_latency_ms", 0)
+                        throughput = metrics.get("throughput_rps", 0)
+                        print(f"    {concurrency:<15} {avg_lat:<14.1f}ms {p95_lat:<14.1f}ms {throughput:<11.1f} rps")
+                    print()
 
         # COMPARISON vs BASELINE (only show if candidate phase and we have comparison data)
         comparison = results.get("comparison", {})
@@ -544,56 +599,154 @@ def display_report(results):
     print(f"{'=' * 80}\n")
 
 
-@click.command()
+@click.group()
+def main():
+    """
+    Turing LLM Benchmark - Hardware-Aware Optimization Benchmark
+
+    Commands:
+      baseline   - Establish baseline performance (run once, keep forever)
+      candidate  - Measure after optimization (auto-compares to baseline)
+      list       - List all saved baselines
+      promote    - Promote a candidate run to a new baseline
+    """
+    pass
+
+
+@main.command()
 @click.argument("phase", type=click.Choice(["baseline", "candidate"], case_sensitive=False))
 @click.option("--endpoint", "-e", required=True, help="LLM service endpoint (e.g., http://localhost:9000)")
 @click.option("--model", "-m", required=True, help="Model name (e.g., qwen2.5-7b, llama2-7b)")
 @click.option("--hardware", "-hw", required=True, help="Hardware (e.g., cpu, a100, xeon, macos)")
 @click.option("--sweep", is_flag=True, help="Also run optional capacity sweep (concurrency levels)")
-def main(phase: str, endpoint: str, model: str, hardware: str, sweep: bool):
+@click.option("--fast", is_flag=True, help="Fast mode: reduced warmup/runs for quick iteration")
+@click.option("--rps", type=int, default=None, help="Override RPS for concurrent phase")
+@click.option("--requests", type=int, default=None, help="Override request count for concurrent phase")
+def run_phase(phase: str, endpoint: str, model: str, hardware: str, sweep: bool, fast: bool, rps: Optional[int], requests: Optional[int]):
     """
-    Turing LLM Benchmark - Simple Hardware-Aware Optimization Benchmark
-
-    One command for any LLM service. Auto-detects framework, tracks by hardware.
+    Run benchmark (baseline or candidate phase).
 
     \b
-    SIMPLE WORKFLOW:
+    WORKFLOW:
+    1. python benchmark.py run-phase baseline --endpoint ... --model qwen2.5-7b --hardware a100
+    2. (optimize your service)
+    3. python benchmark.py run-phase candidate --endpoint ... --model qwen2.5-7b --hardware a100
 
-    1. Baseline (first time):
-       python benchmark.py baseline --endpoint http://localhost:9000 \\
-         --model qwen2.5-7b --hardware a100
-
-    2. Optimize your service
-
-    3. Candidate (after optimization, auto-compares):
-       python benchmark.py candidate --endpoint http://localhost:9000 \\
-         --model qwen2.5-7b --hardware a100
-
-    4. Review improvement/regression percentages
-
-    Optional: Add capacity analysis:
-       python benchmark.py candidate --endpoint http://localhost:9000 \\
-         --model qwen2.5-7b --hardware a100 --sweep
-
-    \b
-    WHAT HAPPENS AUTOMATICALLY:
-    - Framework auto-detection (vLLM, llama.cpp, Ollama, etc.)
-    - Stack ID generation: {model}_{hardware}
-    - Baseline pinning with immutability checks
-    - Automatic comparison reporting (% improvement/regression)
-    - Version tracking (auto-increments if same day)
+    Optional: Add capacity analysis with --sweep
     """
 
     # Auto-generate stack-id from model + hardware (simplifies for user)
     stack_id = f"{model}_{hardware}"
 
     try:
-        asyncio.run(run_benchmark(endpoint, stack_id, phase.lower(), sweep))
+        asyncio.run(run_benchmark(endpoint, stack_id, phase.lower(), sweep, fast, rps, requests))
     except KeyboardInterrupt:
         click.secho("\nBenchmark interrupted", fg="red")
         sys.exit(1)
     except Exception as e:
         click.secho(f"\nError: {e}", fg="red")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@main.command(name="baseline")
+@click.option("--endpoint", "-e", required=True, help="LLM service endpoint (e.g., http://localhost:9000)")
+@click.option("--model", "-m", required=True, help="Model name (e.g., qwen2.5-7b, llama2-7b)")
+@click.option("--hardware", "-hw", required=True, help="Hardware (e.g., cpu, a100, xeon, macos)")
+@click.option("--sweep", is_flag=True, help="Also run optional capacity sweep (concurrency levels)")
+@click.option("--fast", is_flag=True, help="Fast mode: reduced warmup/runs for quick iteration")
+@click.option("--rps", type=int, default=None, help="Override RPS for concurrent phase")
+@click.option("--requests", type=int, default=None, help="Override request count for concurrent phase")
+def baseline_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: bool, rps: Optional[int], requests: Optional[int]):
+    """Establish baseline performance (run once, keep forever)."""
+    stack_id = f"{model}_{hardware}"
+    try:
+        asyncio.run(run_benchmark(endpoint, stack_id, "baseline", sweep, fast, rps, requests))
+    except KeyboardInterrupt:
+        click.secho("\nBenchmark interrupted", fg="red")
+        sys.exit(1)
+    except Exception as e:
+        click.secho(f"\nError: {e}", fg="red")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@main.command(name="candidate")
+@click.option("--endpoint", "-e", required=True, help="LLM service endpoint (e.g., http://localhost:9000)")
+@click.option("--model", "-m", required=True, help="Model name (e.g., qwen2.5-7b, llama2-7b)")
+@click.option("--hardware", "-hw", required=True, help="Hardware (e.g., cpu, a100, xeon, macos)")
+@click.option("--sweep", is_flag=True, help="Also run optional capacity sweep (concurrency levels)")
+@click.option("--fast", is_flag=True, help="Fast mode: reduced warmup/runs for quick iteration")
+@click.option("--rps", type=int, default=None, help="Override RPS for concurrent phase")
+@click.option("--requests", type=int, default=None, help="Override request count for concurrent phase")
+def candidate_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: bool, rps: Optional[int], requests: Optional[int]):
+    """Measure after optimization (auto-compares to baseline)."""
+    stack_id = f"{model}_{hardware}"
+    try:
+        asyncio.run(run_benchmark(endpoint, stack_id, "candidate", sweep, fast, rps, requests))
+    except KeyboardInterrupt:
+        click.secho("\nBenchmark interrupted", fg="red")
+        sys.exit(1)
+    except Exception as e:
+        click.secho(f"\nError: {e}", fg="red")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@main.command(name="list")
+@click.option("--stack-id", default=None, help="Filter by stack ID (optional)")
+def list_cmd(stack_id: str):
+    """List all saved baselines."""
+    BASELINES_DIR.mkdir(exist_ok=True)
+    baseline_manager = BaselineManager(str(BASELINES_DIR))
+
+    try:
+        baselines = baseline_manager.list_baselines(stack_id)
+        if not baselines:
+            print("No baselines found.")
+            return
+
+        print(f"\n{'=' * 80}")
+        print(f"BASELINES")
+        print(f"{'=' * 80}\n")
+
+        for i, baseline_file in enumerate(baselines, 1):
+            click.secho(f"{i}. {baseline_file}", fg="cyan")
+
+        print()
+    except Exception as e:
+        click.secho(f"Error listing baselines: {e}", fg="red")
+        sys.exit(1)
+
+
+@main.command(name="promote")
+@click.argument("candidate_file")
+def promote_cmd(candidate_file: str):
+    """Promote a candidate run to a new baseline."""
+    BASELINES_DIR.mkdir(exist_ok=True)
+    baseline_manager = BaselineManager(str(BASELINES_DIR))
+
+    try:
+        # Resolve the file path
+        candidate_path = Path(candidate_file)
+        if not candidate_path.is_absolute():
+            candidate_path = BASELINES_DIR / candidate_file
+
+        if not candidate_path.exists():
+            click.secho(f"Error: Candidate file not found: {candidate_path}", fg="red")
+            sys.exit(1)
+
+        promoted_file = baseline_manager.promote_candidate_to_baseline(str(candidate_path))
+        click.secho(f"✓ Promoted to baseline: {Path(promoted_file).name}", fg="green")
+        print()
+    except ValueError as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
         import traceback
         traceback.print_exc()
         sys.exit(1)
