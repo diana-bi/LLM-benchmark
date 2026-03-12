@@ -123,7 +123,13 @@ async def run_benchmark(
     seq_runner = SequentialRunner(endpoint, adapter_config)
     conc_runner = ConcurrentRunner(endpoint, adapter_config)
     sweep_runner = SweepRunner(endpoint, adapter_config)
-    validity_layer = ValidityLayer()
+
+    # Create shared embedding cache to avoid reloading model per scenario
+    class _EmbeddingCache:
+        pass
+    embedding_cache = _EmbeddingCache()
+    validity_layer = ValidityLayer(embedding_cache=embedding_cache)
+
     baseline_manager = BaselineManager(str(BASELINES_DIR))
 
     BASELINES_DIR.mkdir(exist_ok=True)
