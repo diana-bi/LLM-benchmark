@@ -138,6 +138,28 @@ async def run_benchmark(
         print(f"Sweep:     enabled")
     print()
 
+    # Pre-flight health check
+    print("Pre-flight check: verifying server is reachable...")
+    try:
+        import httpx
+        with httpx.Client(timeout=5.0) as client:
+            response = client.get(f"{endpoint}/v1/models")
+            if response.status_code != 200:
+                click.secho(
+                    f"[ERROR] Server returned {response.status_code}. "
+                    f"Is the LLM service running and healthy?",
+                    fg="red"
+                )
+                sys.exit(1)
+        click.secho("[OK] Server is reachable and responding", fg="green")
+    except Exception as e:
+        click.secho(f"[ERROR] Cannot reach server at {endpoint}", fg="red")
+        click.secho(f"   Details: {e}", fg="red")
+        click.secho(f"   Make sure the service is running. Example:", fg="yellow")
+        click.secho(f"   docker-compose up -d", fg="yellow")
+        sys.exit(1)
+    print()
+
     # Load baseline if candidate phase
     baseline_data = None
     if phase == "candidate":
