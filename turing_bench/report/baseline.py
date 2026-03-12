@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -49,7 +49,7 @@ class BaselineManager:
         """
 
         if timestamp is None:
-            timestamp = datetime.utcnow().isoformat() + "Z"
+            timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         # Extract date for filename
         date_str = timestamp.split("T")[0]  # YYYY-MM-DD
@@ -262,7 +262,7 @@ class BaselineManager:
 
         # Change phase to baseline
         data["phase"] = "baseline"
-        data["timestamp"] = datetime.utcnow().isoformat() + "Z"
+        data["timestamp"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         # Create new baseline filename
         new_filename = candidate_file.replace("_candidate.json", "_baseline.json")

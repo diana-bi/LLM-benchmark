@@ -31,7 +31,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple
 
 import click
@@ -181,7 +181,7 @@ async def run_benchmark(
     results = {
         "stack_id": stack_id,
         "phase": phase,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "endpoint": endpoint,
         "scenarios": {},
         "comparison": {} if phase == "candidate" else None
