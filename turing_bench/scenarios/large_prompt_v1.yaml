@@ -45,7 +45,9 @@ validity:
   exact_match: false
 
 # Concurrent configuration
+# Reduced from 16 RPS / 32 concurrency / 500 requests
+# Heavy prompt (~800 tokens) needs lower pressure than small_prompt_v1
 concurrent:
-  rps: 16
-  concurrency: 32
-  num_requests: 500
+  rps: 8
+  concurrency: 8
+  num_requests: 200

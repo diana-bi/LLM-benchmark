@@ -301,10 +301,15 @@ async def run_benchmark(
         print(f"{scenario_name}...")
 
         try:
+            # Read concurrent settings from scenario YAML first, adapter config as fallback
+            scenario_concurrent = scenario_cfg.get("concurrent", {})
+            rps = scenario_concurrent.get("rps") or adapter_config.get("concurrent", {}).get("rps", 16)
+            num_requests = scenario_concurrent.get("num_requests") or adapter_config.get("concurrent", {}).get("num_requests", 500)
+
             conc_results = await conc_runner.run_scenario(
                 scenario_cfg,
-                rps=adapter_config.get("concurrent", {}).get("rps", 16),
-                num_requests=adapter_config.get("concurrent", {}).get("num_requests", 500)
+                rps=rps,
+                num_requests=num_requests
             )
 
             successful = [r for r in conc_results if r.error is None]
