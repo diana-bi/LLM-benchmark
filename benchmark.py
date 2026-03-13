@@ -45,6 +45,11 @@ from turing_bench.report.baseline import BaselineManager
 from turing_bench.report.formatter import format_validity_report, format_performance_report
 from turing_bench.stats.percentiles import calculate_percentiles
 from turing_bench.stats.cv import calculate_cv
+from turing_bench.stats.drift import detect_drift
+from turing_bench.stats.spike import detect_spikes
+from turing_bench.stats.distribution import analyze_distribution, detect_bimodal
+from turing_bench.stats.visualize import ascii_time_series, ascii_histogram
+from turing_bench.stats.live_dashboard import LiveDashboard
 
 
 SCENARIOS_DIR = Path(__file__).parent / "turing_bench" / "scenarios"
@@ -110,6 +115,8 @@ async def run_benchmark(
     fast_mode: bool = False,
     rps_override: Optional[int] = None,
     requests_override: Optional[int] = None,
+    show_plots: bool = False,
+    show_live: bool = False,
 ):
     """Run full benchmark."""
 
@@ -133,10 +140,13 @@ async def run_benchmark(
                 scenario_cfg["concurrent"] = {}
             scenario_cfg["concurrent"]["num_requests"] = fast_concurrent
 
+    # Extract model name from stack_id (e.g. "qwen2.5:1.5b_cpu" → "qwen2.5:1.5b")
+    model_name = stack_id.rsplit("_", 1)[0] if "_" in stack_id else stack_id
+
     # Initialize
-    seq_runner = SequentialRunner(endpoint, adapter_config)
-    conc_runner = ConcurrentRunner(endpoint, adapter_config)
-    sweep_runner = SweepRunner(endpoint, adapter_config)
+    seq_runner = SequentialRunner(endpoint, adapter_config, model_name=model_name)
+    conc_runner = ConcurrentRunner(endpoint, adapter_config, model_name=model_name)
+    sweep_runner = SweepRunner(endpoint, adapter_config, model_name=model_name)
 
     # Create shared embedding cache to avoid reloading model per scenario
     class _EmbeddingCache:
@@ -264,9 +274,17 @@ async def run_benchmark(
             ttft_metrics = compute_ttft_metrics(ttft_values)
             metrics.update(ttft_metrics)
 
+            # Observability analysis on sequential latency sequence (ordered in time)
+            seq_analysis = {
+                "drift": detect_drift(latency_values),
+                "spikes": detect_spikes(latency_values),
+            }
+
             results["scenarios"][scenario_name] = {
                 "raw_outputs": raw_outputs,
                 "metrics": metrics,
+                "sequential_latencies": latency_values,
+                "sequential_analysis": seq_analysis,
                 "validity": {
                     "passed": scenario_result.overall_passed if scenario_result else False,
                     "severity": scenario_result.overall_severity.value if scenario_result else "FAIL"
@@ -327,11 +345,26 @@ async def run_benchmark(
             rps = rps_override if rps_override else (scenario_concurrent.get("rps") or adapter_config.get("concurrent", {}).get("rps", 16))
             num_requests = requests_override if requests_override else (scenario_concurrent.get("num_requests") or adapter_config.get("concurrent", {}).get("num_requests", 500))
 
-            conc_results = await conc_runner.run_scenario(
-                scenario_cfg,
-                rps=rps,
-                num_requests=num_requests
-            )
+            if show_live:
+                dashboard = LiveDashboard(scenario_name, num_requests, rps)
+                with dashboard:
+                    run_task = asyncio.create_task(
+                        conc_runner.run_scenario(
+                            scenario_cfg, rps=rps, num_requests=num_requests,
+                            stats_collector=dashboard
+                        )
+                    )
+                    while not run_task.done():
+                        dashboard.update()
+                        await asyncio.sleep(0.25)
+                    conc_results = await run_task
+                    dashboard.finalize()
+            else:
+                conc_results = await conc_runner.run_scenario(
+                    scenario_cfg,
+                    rps=rps,
+                    num_requests=num_requests
+                )
 
             successful = [r for r in conc_results if r.error is None]
             total_requests = len(conc_results)
@@ -345,10 +378,18 @@ async def run_benchmark(
                 ttft_metrics = compute_ttft_metrics(ttft_values)
                 metrics.update(ttft_metrics)
 
+                # Observability analysis on concurrent distribution (unordered, large sample)
+                conc_analysis = {
+                    "distribution": analyze_distribution(latency_values),
+                    "bimodal": detect_bimodal(latency_values),
+                }
+
                 # Add to results
                 if scenario_name not in results["scenarios"]:
                     results["scenarios"][scenario_name] = {}
                 results["scenarios"][scenario_name]["concurrent_metrics"] = metrics
+                results["scenarios"][scenario_name]["concurrent_latencies"] = latency_values
+                results["scenarios"][scenario_name]["concurrent_analysis"] = conc_analysis
                 results["scenarios"][scenario_name]["concurrent_request_count"] = total_requests
                 results["scenarios"][scenario_name]["concurrent_error_count"] = failed_requests
 
@@ -450,7 +491,7 @@ async def run_benchmark(
         sys.exit(1)
 
     # Display report
-    display_report(results)
+    display_report(results, show_plots=show_plots)
 
     return results
 
@@ -467,7 +508,7 @@ def get_cv_tier(cv_percent):
         return "HIGH VARIANCE"
 
 
-def display_report(results):
+def display_report(results, show_plots: bool = False):
     """Display formatted report with clean table layout."""
     phase = results.get("phase", "unknown").upper()
     stack_id = results.get("stack_id", "unknown")
@@ -585,6 +626,88 @@ def display_report(results):
                     print(f"  {scenario_name:<30} (no concurrent data)")
             print()
 
+    # OBSERVABILITY ANALYSIS
+    has_seq_analysis = any(
+        data.get("sequential_analysis") for data in results["scenarios"].values()
+    )
+    has_conc_analysis = any(
+        data.get("concurrent_analysis") for data in results["scenarios"].values()
+    )
+    if has_seq_analysis or has_conc_analysis:
+        print("OBSERVABILITY ANALYSIS")
+        print("-" * 80)
+
+        for scenario_name, data in results["scenarios"].items():
+            seq_analysis = data.get("sequential_analysis", {})
+            conc_analysis = data.get("concurrent_analysis", {})
+
+            if not seq_analysis and not conc_analysis:
+                continue
+
+            print(f"  {scenario_name}")
+
+            # Drift
+            drift = seq_analysis.get("drift", {})
+            if drift:
+                drift_pct = drift.get("drift_percent", 0)
+                drift_icon = "⚠ " if drift.get("has_drift") else "  "
+                drift_color = "yellow" if drift.get("has_drift") else None
+                click.secho(
+                    f"    {drift_icon}Drift:        {drift.get('message', 'n/a')}",
+                    fg=drift_color,
+                )
+
+            # Spikes
+            spikes = seq_analysis.get("spikes", {})
+            if spikes:
+                spike_icon = "⚠ " if spikes.get("has_spikes") else "  "
+                spike_color = "yellow" if spikes.get("has_spikes") else None
+                spike_indices = spikes.get("spike_indices", [])
+                idx_str = f" at runs {spike_indices[:5]}" if spike_indices else ""
+                click.secho(
+                    f"    {spike_icon}Spikes:       {spikes.get('message', 'n/a')}{idx_str}",
+                    fg=spike_color,
+                )
+
+            # Distribution (fat tail)
+            dist = conc_analysis.get("distribution", {})
+            if dist:
+                tail_icon = "⚠ " if dist.get("is_fat_tail") else "  "
+                tail_color = "yellow" if dist.get("is_fat_tail") else None
+                click.secho(
+                    f"    {tail_icon}Fat tail:     {dist.get('message', 'n/a')}",
+                    fg=tail_color,
+                )
+
+            # Bimodal
+            bimodal = conc_analysis.get("bimodal", {})
+            if bimodal:
+                bim_icon = "⚠ " if bimodal.get("is_bimodal") else "  "
+                bim_color = "yellow" if bimodal.get("is_bimodal") else None
+                click.secho(
+                    f"    {bim_icon}Bimodal:      {bimodal.get('message', 'n/a')}",
+                    fg=bim_color,
+                )
+
+            # ASCII plots (only when --plots flag is set)
+            if show_plots:
+                seq_lats = data.get("sequential_latencies", [])
+                conc_lats = data.get("concurrent_latencies", [])
+
+                if seq_lats:
+                    print()
+                    ts = ascii_time_series(seq_lats, title="Sequential latency (ms) — run order")
+                    if ts:
+                        print(ts)
+
+                if conc_lats:
+                    print()
+                    hist = ascii_histogram(conc_lats, title="Concurrent latency distribution (ms)")
+                    if hist:
+                        print(hist)
+
+            print()
+
     # FILES SAVED
     print("FILES SAVED")
     print("-" * 80)
@@ -622,7 +745,9 @@ def main():
 @click.option("--fast", is_flag=True, help="Fast mode: reduced warmup/runs for quick iteration")
 @click.option("--rps", type=int, default=None, help="Override RPS for concurrent phase")
 @click.option("--requests", type=int, default=None, help="Override request count for concurrent phase")
-def run_phase(phase: str, endpoint: str, model: str, hardware: str, sweep: bool, fast: bool, rps: Optional[int], requests: Optional[int]):
+@click.option("--plots", is_flag=True, help="Show ASCII time-series and histogram plots in the report")
+@click.option("--live", "live_dashboard", is_flag=True, help="Show live Rich dashboard during concurrent phase")
+def run_phase(phase: str, endpoint: str, model: str, hardware: str, sweep: bool, fast: bool, rps: Optional[int], requests: Optional[int], plots: bool, live_dashboard: bool):
     """
     Run benchmark (baseline or candidate phase).
 
@@ -639,7 +764,7 @@ def run_phase(phase: str, endpoint: str, model: str, hardware: str, sweep: bool,
     stack_id = f"{model}_{hardware}"
 
     try:
-        asyncio.run(run_benchmark(endpoint, stack_id, phase.lower(), sweep, fast, rps, requests))
+        asyncio.run(run_benchmark(endpoint, stack_id, phase.lower(), sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard))
     except KeyboardInterrupt:
         click.secho("\nBenchmark interrupted", fg="red")
         sys.exit(1)
@@ -658,11 +783,13 @@ def run_phase(phase: str, endpoint: str, model: str, hardware: str, sweep: bool,
 @click.option("--fast", is_flag=True, help="Fast mode: reduced warmup/runs for quick iteration")
 @click.option("--rps", type=int, default=None, help="Override RPS for concurrent phase")
 @click.option("--requests", type=int, default=None, help="Override request count for concurrent phase")
-def baseline_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: bool, rps: Optional[int], requests: Optional[int]):
+@click.option("--plots", is_flag=True, help="Show ASCII time-series and histogram plots in the report")
+@click.option("--live", "live_dashboard", is_flag=True, help="Show live Rich dashboard during concurrent phase")
+def baseline_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: bool, rps: Optional[int], requests: Optional[int], plots: bool, live_dashboard: bool):
     """Establish baseline performance (run once, keep forever)."""
     stack_id = f"{model}_{hardware}"
     try:
-        asyncio.run(run_benchmark(endpoint, stack_id, "baseline", sweep, fast, rps, requests))
+        asyncio.run(run_benchmark(endpoint, stack_id, "baseline", sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard))
     except KeyboardInterrupt:
         click.secho("\nBenchmark interrupted", fg="red")
         sys.exit(1)
@@ -681,11 +808,13 @@ def baseline_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: bo
 @click.option("--fast", is_flag=True, help="Fast mode: reduced warmup/runs for quick iteration")
 @click.option("--rps", type=int, default=None, help="Override RPS for concurrent phase")
 @click.option("--requests", type=int, default=None, help="Override request count for concurrent phase")
-def candidate_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: bool, rps: Optional[int], requests: Optional[int]):
+@click.option("--plots", is_flag=True, help="Show ASCII time-series and histogram plots in the report")
+@click.option("--live", "live_dashboard", is_flag=True, help="Show live Rich dashboard during concurrent phase")
+def candidate_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: bool, rps: Optional[int], requests: Optional[int], plots: bool, live_dashboard: bool):
     """Measure after optimization (auto-compares to baseline)."""
     stack_id = f"{model}_{hardware}"
     try:
-        asyncio.run(run_benchmark(endpoint, stack_id, "candidate", sweep, fast, rps, requests))
+        asyncio.run(run_benchmark(endpoint, stack_id, "candidate", sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard))
     except KeyboardInterrupt:
         click.secho("\nBenchmark interrupted", fg="red")
         sys.exit(1)

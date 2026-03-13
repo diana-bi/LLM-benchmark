@@ -23,42 +23,61 @@ If you skip steps 1–3 and run Turing directly, you'll get clean numbers but lo
 
 ## Quick Start
 
-### 1. Start the llama.cpp Service
+### 1. Install Dependencies
 
 ```bash
-# Build and start the service
-docker-compose up -d llama-cpp
-
-# Verify it's running (wait for healthy status)
-docker-compose ps
-
-# Check conformance
-python turing_bench.py check-conformance-cmd --endpoint http://localhost:8000
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
-You'll need a GGUF model. Download one and place it in `models/model.gguf`:
+> `sentence-transformers` is only required for candidate runs (semantic similarity comparison against a baseline). The first baseline run works without it.
+
+### 2. Start a Model Server
+
+The benchmark works with any OpenAI-compatible endpoint. Examples:
+
+**Ollama (local, native macOS/Linux):**
+```bash
+# Install: https://ollama.com/download
+ollama pull qwen2.5:1.5b
+ollama serve   # runs on http://localhost:11434
+```
+
+**Ollama via Docker:**
+```bash
+docker-compose up ollama -d
+docker exec turing-ollama ollama pull qwen2.5:1.5b
+# endpoint: http://localhost:11434
+```
+
+**vLLM, llama.cpp, or any other OpenAI-compatible server** works the same way — just point `--endpoint` at it.
+
+### 3. Run the Benchmark
 
 ```bash
-# Example: Download a Qwen model
-mkdir -p models
-# Download your GGUF file to models/model.gguf
+# Establish baseline
+python benchmark.py baseline \
+  --endpoint http://localhost:11434 \
+  --model qwen2.5:1.5b \
+  --hardware cpu
+
+# Run candidate (compares against pinned baseline)
+python benchmark.py candidate \
+  --endpoint http://localhost:11434 \
+  --model qwen2.5:1.5b \
+  --hardware cpu
 ```
 
-### 2. Run the Benchmark
+**Common flags:**
 
-```bash
-# Run baseline (saves immutable baseline file)
-python -m turing_bench run \
-  --endpoint http://localhost:8000 \
-  --phase baseline \
-  --stack-id qwen2.5-7b_llama_cpp
-
-# Compare against baseline (loads pinned baseline, compares)
-python -m turing_bench run \
-  --endpoint http://localhost:8000 \
-  --phase candidate \
-  --stack-id qwen2.5-7b_llama_cpp
-```
+| Flag | Description |
+|------|-------------|
+| `--fast` | Reduced runs for quick iteration (25 sequential, 100 concurrent) |
+| `--live` | Rich live dashboard during the concurrent phase |
+| `--plots` | ASCII time-series and histogram charts in the report |
+| `--sweep` | Optional concurrency sweep for saturation analysis |
+| `--rps N` | Override target requests-per-second (default: 16) |
+| `--requests N` | Override total concurrent request count (default: 500) |
 
 ## Architecture
 
@@ -67,12 +86,17 @@ python -m turing_bench run \
 ```
 turing_bench/
 ├── scenarios/           # Frozen, versioned scenarios (YAML)
-├── adapters/           # Backend-specific SSE format configs
-├── runner/             # Sequential and concurrent execution
-├── validity/           # Multi-layer correctness checks
-├── stats/              # Percentiles, CV, distribution analysis
-├── report/             # Report formatting and baseline management
-└── docs/               # Conformance guide for backend integration
+├── adapters/            # Backend-specific SSE format configs
+├── runner/              # Sequential and concurrent execution
+├── validity/            # Multi-layer correctness checks
+├── stats/               # Percentiles, CV, distribution analysis,
+│   ├── drift.py         #   latency drift detection
+│   ├── spike.py         #   spike detection
+│   ├── distribution.py  #   fat-tail and bimodal analysis
+│   ├── visualize.py     #   ASCII time-series and histogram charts
+│   └── live_dashboard.py#   Rich live terminal dashboard
+├── report/              # Report formatting and baseline management
+└── docs/                # Conformance guide for backend integration
 ```
 
 ### The 4 Scenarios
@@ -134,18 +158,33 @@ Each stage must pass before the next:
 
 ### Baseline Pinning
 
-When you run `--phase baseline`:
+When you run `baseline`:
 - Executes all scenarios
 - Saves full result to `baselines/{stack_id}_{date}_baseline.json`
 - Contains: all 50 raw outputs, all metrics, hardware state, timestamp
 
-When you run `--phase candidate`:
+When you run `candidate`:
 - Loads pinned baseline
 - Runs all scenarios
 - **Compares against pinned outputs** (never against a fresh run)
 - Saves result to `baselines/{stack_id}_{date}_candidate.json`
 
 `stack_id` is the key: `qwen2.5-7b_vllm_a100`. Different hardware = different stack, different baselines.
+
+## Observability
+
+The benchmark includes four latency observability signals surfaced in the report:
+
+| Signal | What it reveals |
+|--------|----------------|
+| **Drift** | Mean latency rising across sequential runs — indicates memory pressure, thermal throttling, or KV-cache eviction |
+| **Spikes** | Isolated requests >2.5× the median — garbage collection, OS scheduling jitter, or network glitches |
+| **Fat tails** | P99 ≫ P95 — degraded long requests, attention scaling problems |
+| **Bimodal** | Two latency clusters — fast cache-hit path vs. slow cache-miss path |
+
+Use `--plots` to include ASCII time-series and histogram charts inline in the report.
+
+Use `--live` to see a Rich terminal dashboard during the concurrent phase, showing running P50/P95/P99, CV, TTFT, spike count, live histogram, and drift signal as requests complete.
 
 ## Backend Conformance
 
@@ -155,7 +194,8 @@ Instead:
 
 1. **Conformance check** - Pre-flight validation
    ```bash
-   python turing_bench.py check-conformance-cmd --endpoint http://localhost:8000
+   python benchmark.py check-conformance \
+     --endpoint http://localhost:8000
    ```
 
 2. **Adapters** - Handle SSE format variation (one YAML per backend)
@@ -167,34 +207,25 @@ Instead:
 
 ## Development
 
-### Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
 ### Run Tests
 
 ```bash
 pytest tests/
 ```
 
-### Docker Commands
+### Docker Services
 
 ```bash
-# Start services
-docker-compose up -d
+# Start Ollama
+docker-compose up ollama -d
+
+# Pull a model into the running container
+docker exec turing-ollama ollama pull qwen2.5:1.5b
 
 # Logs
-docker-compose logs -f llama-cpp
-docker-compose logs -f benchmark
+docker-compose logs -f ollama
 
-# Run benchmark inside container
-docker exec turing-benchmark python turing_bench.py run-benchmark \
-  --endpoint http://llama-cpp:8000 \
-  --adapter llama_cpp
-
-# Stop services
+# Stop
 docker-compose down
 ```
 
@@ -204,7 +235,8 @@ The report shows:
 
 - **Validity Gate**: Pass/fail for each scenario with similarity scores
 - **Performance**: TTFT (P50/P95), throughput, latency percentiles
-- **Stability**: CV (coefficient of variation), drift detection
+- **Stability**: CV (coefficient of variation), drift detection, spike count
+- **Observability Analysis**: Per-scenario drift, spike, fat-tail, and bimodal signals
 
 ## References
 
@@ -214,4 +246,4 @@ The report shows:
 
 ---
 
-**Questions?** See `--help` for detailed CLI options.
+**Questions?** Run `python benchmark.py --help` or `python benchmark.py baseline --help` for detailed CLI options.

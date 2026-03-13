@@ -34,6 +34,7 @@ class ConcurrentRunner:
         endpoint_url: str,
         adapter_config: Dict[str, Any],
         timeout_s: float = 30.0,
+        model_name: str = "default",
     ):
         """
         Initialize runner.
@@ -42,14 +43,20 @@ class ConcurrentRunner:
             endpoint_url: Service endpoint
             adapter_config: Backend adapter config
             timeout_s: Per-request timeout
+            model_name: Model name to send in API requests (required for Ollama/vLLM)
         """
         self.endpoint_url = endpoint_url
         self.adapter_config = adapter_config
         self.timeout_s = timeout_s
+        self.model_name = model_name
         self.parser = SSEParser(adapter_config)
 
     async def run_scenario(
-        self, scenario: Dict[str, Any], rps: int, num_requests: int = 500
+        self,
+        scenario: Dict[str, Any],
+        rps: int,
+        num_requests: int = 500,
+        stats_collector=None,
     ) -> List[ConcurrentRunResult]:
         """
         Run scenario concurrently at fixed RPS.
@@ -58,6 +65,8 @@ class ConcurrentRunner:
             scenario: Scenario definition
             rps: Requests per second target
             num_requests: Total requests to send
+            stats_collector: Optional object with on_result(result) called per response.
+                             Used by LiveDashboard for real-time display updates.
 
         Returns:
             List of request results
@@ -66,7 +75,8 @@ class ConcurrentRunner:
         results = []
         interval = 1.0 / rps  # Seconds between request starts
 
-        print(f"  Running {num_requests} requests at {rps} RPS...", flush=True)
+        if stats_collector is None:
+            print(f"  Running {num_requests} requests at {rps} RPS...", flush=True)
 
         async with httpx.AsyncClient(timeout=self.timeout_s) as client:
             # Launch requests at controlled rate
@@ -78,18 +88,18 @@ class ConcurrentRunner:
                 scheduled_time = start_time + (req_num * interval)
                 wait_time = max(0, scheduled_time - time.time())
 
-                # Create task that waits until scheduled time then makes request
                 task = asyncio.create_task(
-                    self._scheduled_request(client, scenario, req_num + 1, wait_time)
+                    self._scheduled_request(
+                        client, scenario, req_num + 1, wait_time, stats_collector
+                    )
                 )
                 tasks.append(task)
 
-                # Print progress every 100 requests
-                if (req_num + 1) % 100 == 0:
+                if stats_collector is None and (req_num + 1) % 100 == 0:
                     print(f"    Launched {req_num + 1}/{num_requests}", flush=True)
 
-            # Collect results as they complete
-            print("  Waiting for responses...", flush=True)
+            if stats_collector is None:
+                print("  Waiting for responses...", flush=True)
             results = await asyncio.gather(*tasks)
 
         return results
@@ -100,6 +110,7 @@ class ConcurrentRunner:
         scenario: Dict[str, Any],
         request_number: int,
         wait_time: float,
+        stats_collector=None,
     ) -> ConcurrentRunResult:
         """Execute a single request at scheduled time."""
 
@@ -118,7 +129,7 @@ class ConcurrentRunner:
                 "POST",
                 f"{self.endpoint_url}/v1/chat/completions",
                 json={
-                    "model": "test",
+                    "model": self.model_name,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": True,
                     "temperature": temperature,
@@ -133,7 +144,7 @@ class ConcurrentRunner:
                 metrics = await self.parser.parse_stream(response.aiter_lines())
                 full_output = "".join(chunk.content for chunk in metrics.chunks)
 
-                return ConcurrentRunResult(
+                result = ConcurrentRunResult(
                     scenario_id=scenario["scenario_id"],
                     request_number=request_number,
                     output=full_output,
@@ -142,9 +153,12 @@ class ConcurrentRunner:
                     total_time_ms=metrics.total_time_ms,
                     error=None,
                 )
+                if stats_collector is not None:
+                    stats_collector.on_result(result)
+                return result
 
         except Exception as e:
-            return ConcurrentRunResult(
+            result = ConcurrentRunResult(
                 scenario_id=scenario["scenario_id"],
                 request_number=request_number,
                 output="",
@@ -153,6 +167,9 @@ class ConcurrentRunner:
                 total_time_ms=0,
                 error=str(e),
             )
+            if stats_collector is not None:
+                stats_collector.on_result(result)
+            return result
 
     def results_to_dict(self, results: List[ConcurrentRunResult]) -> Dict[str, Any]:
         """Convert results to serializable format."""

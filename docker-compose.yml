@@ -1,6 +1,21 @@
 version: '3.8'
 
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: turing-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
   llama-cpp:
     build:
       context: .
@@ -54,3 +69,6 @@ services:
       bash -c "echo 'Benchmark container ready. Run: docker exec turing-benchmark python -m turing_bench --endpoint http://llama-cpp:8000 --phase baseline'"
     stdin_open: true
     tty: true
+
+volumes:
+  ollama_data:
