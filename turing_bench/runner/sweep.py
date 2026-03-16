@@ -53,6 +53,7 @@ class SweepRunner:
         endpoint_url: str,
         adapter_config: Dict[str, Any],
         timeout_s: float = 30.0,
+        model_name: str = "default",
     ):
         """
         Initialize runner.
@@ -61,10 +62,12 @@ class SweepRunner:
             endpoint_url: Service endpoint
             adapter_config: Backend adapter config
             timeout_s: Per-request timeout
+            model_name: Model name to send in API requests (required for Ollama/vLLM)
         """
         self.endpoint_url = endpoint_url
         self.adapter_config = adapter_config
         self.timeout_s = timeout_s
+        self.model_name = model_name
         self.parser = SSEParser(adapter_config)
 
     async def run_scenario_sweep(
@@ -162,7 +165,7 @@ class SweepRunner:
                     "POST",
                     f"{self.endpoint_url}/v1/chat/completions",
                     json={
-                        "model": "test",
+                        "model": self.model_name,
                         "messages": [{"role": "user", "content": prompt}],
                         "stream": True,
                         "temperature": temperature,

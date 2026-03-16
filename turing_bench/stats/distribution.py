@@ -1,4 +1,4 @@
-"""Distribution analysis - detect fat tails, skewness, and bimodality."""
+"""Distribution analysis - detect fat tails, skewness, and bimodal patterns."""
 
 import statistics
 from typing import Dict, Any
@@ -83,5 +83,85 @@ def analyze_distribution(latencies: list) -> Dict[str, Any]:
         "is_right_skewed": is_right_skewed,
         "is_bimodal": is_bimodal,
         "bimodal_gap": bimodal_gap,
+        "message": message,
+    }
+
+
+def detect_bimodal(
+    latencies: list,
+    min_cluster_fraction: float = 0.15,
+    gap_ratio_threshold: float = 5.0,
+) -> Dict[str, Any]:
+    """
+    Detect bimodal (two-cluster) latency distribution.
+
+    A bimodal distribution typically means two different code paths are being
+    exercised: cached vs uncached KV, two batch sizes forming, or fast vs slow
+    backend instances.
+
+    Strategy: look for a significant gap in sorted latencies in the middle 70%
+    of data. If the largest gap is >> the median gap and both resulting clusters
+    are substantial, flag as bimodal.
+
+    Args:
+        latencies: List of latency values in ms
+        min_cluster_fraction: Minimum fraction of data in each cluster (default 15%)
+        gap_ratio_threshold: How many times larger the max gap must be vs median gap
+
+    Returns:
+        Dict with is_bimodal, cluster means, gap_ratio, message
+    """
+    if len(latencies) < 10:
+        return {
+            "is_bimodal": False,
+            "gap_ratio": 0.0,
+            "message": "Too few samples for bimodal detection",
+        }
+
+    sorted_lats = sorted(latencies)
+    n = len(sorted_lats)
+
+    gaps = [sorted_lats[i + 1] - sorted_lats[i] for i in range(n - 1)]
+
+    # Only look for gaps in the middle 70% to avoid outliers distorting the split
+    start = int(n * 0.15)
+    end = int(n * 0.85)
+    mid_gaps = [(gaps[i], i) for i in range(start, min(end, len(gaps)))]
+
+    if not mid_gaps:
+        return {"is_bimodal": False, "gap_ratio": 0.0, "message": "Insufficient data"}
+
+    sorted_all_gaps = sorted(gaps)
+    median_gap = sorted_all_gaps[len(sorted_all_gaps) // 2]
+
+    if median_gap <= 0:
+        return {"is_bimodal": False, "gap_ratio": 0.0, "message": "No variance in data"}
+
+    max_mid_gap, max_gap_idx = max(mid_gaps)
+    gap_ratio = max_mid_gap / median_gap
+
+    split_idx = max_gap_idx + 1
+    cluster1_frac = split_idx / n
+    cluster2_frac = (n - split_idx) / n
+
+    is_bimodal = (
+        gap_ratio >= gap_ratio_threshold
+        and cluster1_frac >= min_cluster_fraction
+        and cluster2_frac >= min_cluster_fraction
+    )
+
+    if is_bimodal:
+        c1_mean = sum(sorted_lats[:split_idx]) / split_idx
+        c2_mean = sum(sorted_lats[split_idx:]) / (n - split_idx)
+        message = (
+            f"Bimodal: cluster 1 ~{c1_mean:.0f}ms ({cluster1_frac * 100:.0f}% of requests), "
+            f"cluster 2 ~{c2_mean:.0f}ms ({cluster2_frac * 100:.0f}%)"
+        )
+    else:
+        message = "Unimodal distribution"
+
+    return {
+        "is_bimodal": is_bimodal,
+        "gap_ratio": round(gap_ratio, 1),
         "message": message,
     }
