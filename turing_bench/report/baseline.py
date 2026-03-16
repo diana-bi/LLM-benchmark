@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -51,18 +51,18 @@ class BaselineManager:
         if timestamp is None:
             timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-        # Extract date for filename
-        date_str = timestamp.split("T")[0]  # YYYY-MM-DD
+        # Extract date for filename (use local date, not UTC, to avoid timezone mismatch)
+        date_str = date.today().isoformat()  # YYYY-MM-DD in local timezone
         filename = f"{stack_id}_{date_str}_{phase}.json"
         filepath = self.baselines_dir / filename
 
-        # Safety check: never overwrite existing baseline
+        # Safety check: never overwrite existing baseline, but auto-increment version if needed
         if filepath.exists() and phase == "baseline":
-            raise ValueError(
-                f"Baseline file already exists: {filepath}. "
-                f"Not overwriting to maintain immutability. "
-                f"Use a different stack_id or date."
-            )
+            version = 2
+            while filepath.exists():
+                versioned_name = f"{stack_id}_{date_str}_v{version}_{phase}.json"
+                filepath = self.baselines_dir / versioned_name
+                version += 1
 
         baseline_data = {
             "schema_version": "1.0",

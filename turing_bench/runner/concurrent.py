@@ -144,6 +144,8 @@ class ConcurrentRunner:
                 )
 
         except Exception as e:
+            # Log error for debugging
+            error_msg = f"{type(e).__name__}: {str(e)}"
             return ConcurrentRunResult(
                 scenario_id=scenario["scenario_id"],
                 request_number=request_number,
@@ -151,7 +153,7 @@ class ConcurrentRunner:
                 ttft_ms=0,
                 output_tokens=0,
                 total_time_ms=0,
-                error=str(e),
+                error=error_msg,
             )
 
     def results_to_dict(self, results: List[ConcurrentRunResult]) -> Dict[str, Any]:

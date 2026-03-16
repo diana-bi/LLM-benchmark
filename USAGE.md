@@ -494,8 +494,51 @@ CV = std_deviation / mean × 100%
 
 ---
 
+## Observability: Understanding Why Performance Changed
+
+Latency numbers tell you *what* changed (P95 went from 500ms to 600ms) but not *why*. The **Observability Analysis** section automatically appears in every report to reveal root causes through four stability signals:
+
+**Drift** = progressive slowdown over time (memory growth, thermal throttling, resource leak)
+**Spikes** = isolated outliers >2.5× median latency (GC pauses, context switches, I/O wait)
+**Fat Tail** = P99/P95 ratio >1.5× (occasional very slow requests not captured by P95)
+**Bimodal** = two distinct latency populations (mode switching, batching effects, cache hit/miss boundary)
+
+### Example Report
+
+```
+OBSERVABILITY ANALYSIS
+────────────────────────────────────────────────────────────────────
+  control_prompt_v1
+      Drift:        No drift detected (+0.3%)
+      Spikes:       0 spikes (0.0%)
+      Fat tail:     P99/P95 ratio: 1.2×   OK
+      Bimodal:      No
+
+  small_prompt_v1
+  ⚠   Drift:        +6.2% (progressive slowdown)
+  ⚠   Spikes:       2 spikes (4.0%)
+  ⚠   Fat tail:     P99/P95 ratio: 1.8×   WARN
+      Bimodal:      No
+```
+
+**Color coding:** Green = OK, Yellow = warning. If ANY signal fires for a scenario, a ⚠ marker appears.
+
+### What Each Signal Means
+
+| Signal | Threshold | Indicates | Common Cause |
+|--------|-----------|-----------|--------------|
+| **Drift** | >5% slowdown trend | Progressive degradation | Memory leak, thermal throttle, resource exhaustion |
+| **Spikes** | >2.5× median | Intermittent delays | GC pauses, context switches, I/O contention |
+| **Fat Tail** | P99/P95 > 1.5× | Occasional outliers | Request queuing, mode switching, batching effects |
+| **Bimodal** | Largest gap > 5× median gap | Two distinct populations | Cache hit/miss boundary, routing to different paths |
+
+The raw latency list is saved in the baseline JSON for deeper analysis. See **[OBSERVABILITY.md](OBSERVABILITY.md)** for detailed signal interpretation and debugging.
+
+---
+
 ## See Also
 
 - **[SCENARIOS.md](SCENARIOS.md)** — What each scenario measures
+- **[OBSERVABILITY.md](OBSERVABILITY.md)** — Stability signals explained (drift, spikes, fat-tail, bimodal)
 - **[README.md](README.md)** — Architecture and design
 - **[baselines/](baselines/)** — Saved baseline and candidate files

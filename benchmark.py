@@ -45,6 +45,9 @@ from turing_bench.report.baseline import BaselineManager
 from turing_bench.report.formatter import format_validity_report, format_performance_report
 from turing_bench.stats.percentiles import calculate_percentiles
 from turing_bench.stats.cv import calculate_cv
+from turing_bench.stats.drift import detect_drift
+from turing_bench.stats.spike import detect_spikes
+from turing_bench.stats.distribution import analyze_distribution
 
 
 SCENARIOS_DIR = Path(__file__).parent / "turing_bench" / "scenarios"
@@ -123,15 +126,17 @@ async def run_benchmark(
             scenarios[scenario_file.stem] = yaml.safe_load(f)
 
     # Apply fast mode defaults if enabled
+    # Fast mode: 60-75% faster baseline runs for quick iteration during development
+    # - Warmup: 20 requests → 5 requests (25% of original)
+    # - Sequential: 50 runs → 25 runs (50% of original)
+    # - Concurrent: 20% of original num_requests (maintains relative load profile across scenarios)
     if fast_mode:
-        fast_warmup = 5
-        fast_sequential = 25
-        fast_concurrent = 100
         for scenario_cfg in scenarios.values():
-            scenario_cfg["runs"] = scenario_cfg.get("runs", fast_sequential)
-            if "concurrent" not in scenario_cfg:
-                scenario_cfg["concurrent"] = {}
-            scenario_cfg["concurrent"]["num_requests"] = fast_concurrent
+            scenario_cfg["warmup"] = 5       # override warmup
+            scenario_cfg["runs"] = 25        # override sequential runs
+            # Scale concurrent requests proportionally (prevents overwhelming low-capacity servers)
+            original_num_requests = scenario_cfg.get("concurrent", {}).get("num_requests", 100)
+            scenario_cfg.setdefault("concurrent", {})["num_requests"] = max(20, int(original_num_requests * 0.2))
 
     # Initialize
     seq_runner = SequentialRunner(endpoint, adapter_config)
@@ -203,9 +208,30 @@ async def run_benchmark(
         "phase": phase,
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "endpoint": endpoint,
+        "fast_mode": fast_mode,
+        "rps_override": rps_override,
+        "requests_override": requests_override,
+        "include_sweep": include_sweep,
         "scenarios": {},
         "comparison": {} if phase == "candidate" else None
     }
+
+    # Build scenario_configs metadata early (used in both failure and success paths)
+    scenario_configs = {}
+    for scenario_name, scenario_cfg in scenarios.items():
+        concurrent_cfg = scenario_cfg.get("concurrent", {})
+        default_rps = concurrent_cfg.get("rps", 16)
+        default_requests = concurrent_cfg.get("num_requests", 500)
+
+        actual_rps = rps_override if rps_override is not None else default_rps
+        actual_requests = requests_override if requests_override is not None else default_requests
+
+        scenario_configs[scenario_name] = {
+            "warmup": f"{scenario_cfg.get('warmup', 20)} (default: 20)" if not fast_mode else f"{scenario_cfg.get('warmup', 5)} (fast: 5)",
+            "runs": f"{scenario_cfg.get('runs', 50)} (default: 50)" if not fast_mode else f"{scenario_cfg.get('runs', 25)} (fast: 25)",
+            "rps": f"{actual_rps} (default: {default_rps})" if actual_rps != default_rps else f"{default_rps} (default)",
+            "num_requests": f"{actual_requests} (default: {default_requests})" if actual_requests != default_requests else f"{default_requests} (default)",
+        }
 
     # PHASE 1: Sequential
     print(f"{'=' * 70}")
@@ -267,6 +293,7 @@ async def run_benchmark(
             results["scenarios"][scenario_name] = {
                 "raw_outputs": raw_outputs,
                 "metrics": metrics,
+                "sequential_latencies": latency_values,  # Store for stability analysis
                 "validity": {
                     "passed": scenario_result.overall_passed if scenario_result else False,
                     "severity": scenario_result.overall_severity.value if scenario_result else "FAIL"
@@ -292,21 +319,26 @@ async def run_benchmark(
                 "validity": scenario_data.get("validity", {})
             }
 
-        # Prepare metadata
+        # Prepare metadata - use scenario_configs built earlier
         metadata = {
             "endpoint": results.get("endpoint", ""),
+            "fast_mode": fast_mode,
+            "scenario_configs": scenario_configs,
+            "include_sweep": include_sweep,
         }
 
         try:
-            baseline_manager.save_baseline(
+            report_file = baseline_manager.save_baseline(
                 stack_id=results["stack_id"],
                 phase=results["phase"],
                 scenario_results=scenario_results,
                 metadata=metadata,
                 timestamp=results.get("timestamp")
             )
+            results["_saved_files"] = [Path(report_file).name]  # Track saved file
         except ValueError as e:
             click.secho(f"[ERROR] {e}", fg="red")
+            results["_saved_files"] = []
 
         # Report will be displayed at the end (line 395)
         return results
@@ -351,6 +383,7 @@ async def run_benchmark(
                 results["scenarios"][scenario_name]["concurrent_metrics"] = metrics
                 results["scenarios"][scenario_name]["concurrent_request_count"] = total_requests
                 results["scenarios"][scenario_name]["concurrent_error_count"] = failed_requests
+                results["scenarios"][scenario_name]["concurrent_latencies"] = latency_values  # Store for stability analysis
 
                 # Compare to baseline if candidate phase
                 if phase == "candidate" and baseline_data:
@@ -373,12 +406,35 @@ async def run_benchmark(
                 results["scenarios"][scenario_name]["concurrent_metrics"] = {}
                 results["scenarios"][scenario_name]["concurrent_request_count"] = total_requests
                 results["scenarios"][scenario_name]["concurrent_error_count"] = failed_requests
+
+                # Capture error details (group by error type)
+                error_counts = {}
+                for r in conc_results:
+                    if r.error:
+                        error_type = r.error.split(":")[0]  # Get first part (exception type)
+                        error_counts[error_type] = error_counts.get(error_type, 0) + 1
+
+                error_summary = ", ".join(f"{error_type}({count})" for error_type, count in sorted(error_counts.items())[:3])
+                results["scenarios"][scenario_name]["concurrent_error_summary"] = error_summary
+
                 click.secho(f"  ERROR: All {total_requests} requests failed", fg="red")
+                if error_summary:
+                    click.secho(f"    Errors: {error_summary}", fg="yellow")
 
         except Exception as e:
             click.secho(f"  ERROR: {e}", fg="red")
 
     print()
+
+    # Run stability analysis on latencies collected
+    for scenario_name, scenario_data in results["scenarios"].items():
+        latencies = scenario_data.get("concurrent_latencies", [])
+        if latencies:
+            scenario_data["stability"] = {
+                "drift": detect_drift(latencies),
+                "spikes": detect_spikes(latencies),
+                "distribution": analyze_distribution(latencies),
+            }
 
     # PHASE 3: Sweep (optional)
     if include_sweep:
@@ -430,10 +486,14 @@ async def run_benchmark(
             "sweep": scenario_data.get("sweep", {})
         }
 
-    # Prepare metadata
+    # Prepare metadata - show defaults + actual values per scenario (reuse from validity gate path)
+    # Note: scenario_configs was already built earlier, just use it directly
     metadata = {
         "endpoint": results.get("endpoint", ""),
         "timestamp": results.get("timestamp", ""),
+        "fast_mode": fast_mode,
+        "scenario_configs": scenario_configs,
+        "include_sweep": include_sweep,
     }
 
     try:
@@ -444,12 +504,13 @@ async def run_benchmark(
             metadata=metadata,
             timestamp=results.get("timestamp")
         )
+        results["_saved_files"] = [Path(report_file).name]  # Track which file was created in this run
     except ValueError as e:
         click.secho(f"[ERROR] {e}", fg="red")
         print()
         sys.exit(1)
 
-    # Display report
+    # Display report with list of files created in this run
     display_report(results)
 
     return results
@@ -467,14 +528,33 @@ def get_cv_tier(cv_percent):
         return "HIGH VARIANCE"
 
 
-def display_report(results):
+def display_report(results, saved_files=None):
     """Display formatted report with clean table layout."""
+    if saved_files is None:
+        saved_files = results.get("_saved_files", [])
     phase = results.get("phase", "unknown").upper()
     stack_id = results.get("stack_id", "unknown")
     timestamp = results.get("timestamp", "").split("T")[0] if results.get("timestamp") else "unknown"
+    fast_mode = results.get("fast_mode", False)
+    rps_override = results.get("rps_override")
+    requests_override = results.get("requests_override")
+    include_sweep = results.get("include_sweep", False)
+
+    # Build flags label showing non-default settings
+    flags = []
+    if fast_mode:
+        flags.append("FAST MODE")
+    if rps_override:
+        flags.append(f"RPS={rps_override}")
+    if requests_override:
+        flags.append(f"REQS={requests_override}")
+    if include_sweep:
+        flags.append("SWEEP")
+
+    flags_label = f" [{', '.join(flags)}]" if flags else ""
 
     print(f"\n{'=' * 80}")
-    print(f"REPORT — {stack_id}  |  {phase}  |  {timestamp}")
+    print(f"REPORT — {stack_id}  |  {phase}  |  {timestamp}{flags_label}")
     print(f"{'=' * 80}\n")
 
     # VALIDITY GATE
@@ -585,15 +665,67 @@ def display_report(results):
                     print(f"  {scenario_name:<30} (no concurrent data)")
             print()
 
-    # FILES SAVED
-    print("FILES SAVED")
+    # OBSERVABILITY ANALYSIS - stability signals from latency distribution
+    print("OBSERVABILITY ANALYSIS")
     print("-" * 80)
-    latest_files = sorted(BASELINES_DIR.glob(f"{results['stack_id']}*"), key=lambda x: x.stat().st_mtime, reverse=True)[:3]
-    for f in latest_files:
-        if results["stack_id"] in f.name:
-            marker = "← this run" if "candidate" in f.name or "baseline" in f.name else ""
-            click.secho(f"  {f.name:<50} {marker}", fg="cyan")
+    any_warnings = False
+    for scenario_name, scenario_data in results["scenarios"].items():
+        stability = scenario_data.get("stability", {})
+        if not stability:
+            continue  # Skip if no stability data
+
+        drift = stability.get("drift", {})
+        spikes = stability.get("spikes", {})
+        distribution = stability.get("distribution", {})
+
+        # Check if any warnings
+        has_warning = (drift.get("has_drift", False) or
+                       spikes.get("spike_count", 0) > 0 or
+                       distribution.get("is_fat_tail", False) or
+                       distribution.get("is_bimodal", False))
+
+        marker = "  ⚠   " if has_warning else "      "
+        any_warnings = any_warnings or has_warning
+
+        print(f"{marker}{scenario_name}")
+
+        # Drift
+        drift_pct = drift.get("drift_percent", 0)
+        drift_msg = f"No drift detected ({drift_pct:+.1f}%)" if not drift.get("has_drift", False) else f"{drift_pct:+.1f}% (progressive slowdown)"
+        drift_color = "yellow" if drift.get("has_drift", False) else "green"
+        click.secho(f"      Drift:        {drift_msg}", fg=drift_color)
+
+        # Spikes
+        spike_count = spikes.get("spike_count", 0)
+        spike_pct = spikes.get("spike_percent", 0)
+        spike_msg = f"{spike_count} spikes ({spike_pct:.1f}%)"
+        spike_color = "yellow" if spike_count > 0 else "green"
+        click.secho(f"      Spikes:       {spike_msg}", fg=spike_color)
+
+        # Fat tail
+        ratio = distribution.get("p99_p95_ratio", 1.0)
+        is_fat = distribution.get("is_fat_tail", False)
+        fat_tail_msg = f"P99/P95 ratio: {ratio:.2f}x   {'WARN' if is_fat else 'OK'}"
+        fat_tail_color = "yellow" if is_fat else "green"
+        click.secho(f"      Fat tail:     {fat_tail_msg}", fg=fat_tail_color)
+
+        # Bimodal
+        is_bim = distribution.get("is_bimodal", False)
+        bimodal_msg = "Yes" if is_bim else "No"
+        bimodal_color = "yellow" if is_bim else "green"
+        click.secho(f"      Bimodal:      {bimodal_msg}", fg=bimodal_color)
+
+        print()
+
     print()
+
+    # FILES SAVED - only show files created in this run
+    if saved_files:
+        print("FILES SAVED")
+        print("-" * 80)
+        for filename in saved_files:
+            click.secho(f"  {filename:<50} ← this run", fg="cyan")
+        print()
 
     click.secho("Benchmark complete!", fg="green")
     print(f"{'=' * 80}\n")
