@@ -1,5 +1,6 @@
-"""Distribution analysis - detect fat tails and skewness."""
+"""Distribution analysis - detect fat tails, skewness, and bimodality."""
 
+import statistics
 from typing import Dict, Any
 
 
@@ -51,6 +52,21 @@ def analyze_distribution(latencies: list) -> Dict[str, Any]:
     # Fat tail detection
     is_fat_tail = p99_p95_ratio > 1.5
 
+    # Bimodal detection: two distinct latency populations
+    # Algorithm: find largest gap between consecutive sorted values
+    # If largest_gap > 5 × median_gap, flag as bimodal
+    is_bimodal = False
+    bimodal_gap = 0.0
+    if len(sorted_latencies) > 1:
+        gaps = [sorted_latencies[i + 1] - sorted_latencies[i] for i in range(len(sorted_latencies) - 1)]
+        if gaps:
+            median_gap = statistics.median(gaps)
+            largest_gap = max(gaps)
+            # Only flag bimodal if median gap is meaningful (>0.1ms) to avoid noise
+            if median_gap > 0.1:
+                is_bimodal = largest_gap > 5 * median_gap
+                bimodal_gap = largest_gap
+
     message = f"P99/P95 ratio: {p99_p95_ratio:.2f}x"
     if is_fat_tail:
         message += " - fat tail detected"
@@ -65,5 +81,7 @@ def analyze_distribution(latencies: list) -> Dict[str, Any]:
         "p99_p95_ratio": p99_p95_ratio,
         "is_fat_tail": is_fat_tail,
         "is_right_skewed": is_right_skewed,
+        "is_bimodal": is_bimodal,
+        "bimodal_gap": bimodal_gap,
         "message": message,
     }
