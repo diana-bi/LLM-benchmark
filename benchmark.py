@@ -199,6 +199,34 @@ async def run_benchmark(
             baseline_data = baseline_manager.load_baseline(stack_id)
             baseline_ts = baseline_data.get('timestamp', 'unknown')
             click.secho(f"[OK] Loaded baseline: {baseline_ts}", fg="green")
+
+            # Validate metadata consistency for valid comparison
+            hw_state = baseline_data.get('hardware_state', {})
+            baseline_fast_mode = hw_state.get('fast_mode', False)
+            baseline_rps = hw_state.get('rps_override')
+            baseline_requests = hw_state.get('requests_override')
+            baseline_sweep = hw_state.get('include_sweep', False)
+
+            mismatches = []
+            if baseline_fast_mode != fast_mode:
+                mode_baseline = "FAST MODE" if baseline_fast_mode else "PRODUCTION"
+                mode_candidate = "FAST MODE" if fast_mode else "PRODUCTION"
+                mismatches.append(f"test mode ({mode_baseline} → {mode_candidate})")
+
+            if baseline_rps != rps_override:
+                mismatches.append(f"RPS override (baseline={baseline_rps}, candidate={rps_override})")
+
+            if baseline_requests != requests_override:
+                mismatches.append(f"requests override (baseline={baseline_requests}, candidate={requests_override})")
+
+            if baseline_sweep != include_sweep:
+                mismatches.append(f"sweep setting (baseline={baseline_sweep}, candidate={include_sweep})")
+
+            if mismatches:
+                click.secho("[WARNING] Baseline and candidate have different parameters:", fg="yellow")
+                for mismatch in mismatches:
+                    click.secho(f"  • {mismatch}", fg="yellow")
+                click.secho("[WARNING] Comparison metrics may not be valid", fg="yellow")
             print()
         except FileNotFoundError:
             parts = stack_id.split('_')
@@ -336,9 +364,12 @@ async def run_benchmark(
         # Prepare metadata - use scenario_configs built earlier
         metadata = {
             "endpoint": results.get("endpoint", ""),
+            "timestamp": results.get("timestamp", ""),
             "fast_mode": fast_mode,
             "scenario_configs": scenario_configs,
             "include_sweep": include_sweep,
+            "rps_override": rps_override,
+            "requests_override": requests_override,
         }
 
         try:
@@ -531,6 +562,8 @@ async def run_benchmark(
         "fast_mode": fast_mode,
         "scenario_configs": scenario_configs,
         "include_sweep": include_sweep,
+        "rps_override": rps_override,
+        "requests_override": requests_override,
     }
 
     try:
