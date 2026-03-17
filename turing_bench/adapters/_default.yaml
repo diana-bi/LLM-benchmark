@@ -51,9 +51,11 @@ skip_empty_deltas: true
 hardware_type: gpu
 warmup_default: 20
 
-# Timeouts
-request_timeout: 30
-stream_timeout: 60
+# Timeouts (increased for CPU deployments with large prompts)
+# GPU: 30s request / 60s stream is usually sufficient
+# CPU with large prompts: May need 60s+ request timeout
+request_timeout: 60
+stream_timeout: 120
 
 # Concurrent workload defaults
 # Tune these per hardware, but the benchmark is portable across settings
