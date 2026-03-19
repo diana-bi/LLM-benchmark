@@ -117,6 +117,7 @@ async def run_benchmark(
     requests_override: Optional[int] = None,
     show_plots: bool = False,
     show_live: bool = False,
+    model_name: Optional[str] = None,
 ):
     """Run full benchmark."""
 
@@ -142,8 +143,10 @@ async def run_benchmark(
             original_num_requests = scenario_cfg.get("concurrent", {}).get("num_requests", 100)
             scenario_cfg.setdefault("concurrent", {})["num_requests"] = max(20, int(original_num_requests * 0.2))
 
-    # Extract model name from stack_id (e.g. "qwen2.5:1.5b_cpu" → "qwen2.5:1.5b")
-    model_name = stack_id.rsplit("_", 1)[0] if "_" in stack_id else stack_id
+    # Use explicitly passed model_name (preserves original slashes for API calls),
+    # falling back to extracting from stack_id for backwards compatibility
+    if model_name is None:
+        model_name = stack_id.rsplit("_", 1)[0] if "_" in stack_id else stack_id
 
     # Initialize
     seq_runner = SequentialRunner(endpoint, adapter_config, model_name=model_name)
@@ -870,7 +873,7 @@ def run_phase(phase: str, endpoint: str, model: str, hardware: str, sweep: bool,
     stack_id = f"{safe_model}_{hardware}"
 
     try:
-        asyncio.run(run_benchmark(endpoint, stack_id, phase.lower(), sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard))
+        asyncio.run(run_benchmark(endpoint, stack_id, phase.lower(), sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard, model_name=model))
     except KeyboardInterrupt:
         click.secho("\nBenchmark interrupted", fg="red")
         sys.exit(1)
@@ -896,7 +899,7 @@ def baseline_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: bo
     safe_model = model.replace("/", "-")
     stack_id = f"{safe_model}_{hardware}"
     try:
-        asyncio.run(run_benchmark(endpoint, stack_id, "baseline", sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard))
+        asyncio.run(run_benchmark(endpoint, stack_id, "baseline", sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard, model_name=model))
     except KeyboardInterrupt:
         click.secho("\nBenchmark interrupted", fg="red")
         sys.exit(1)
@@ -922,7 +925,7 @@ def candidate_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: b
     safe_model = model.replace("/", "-")
     stack_id = f"{safe_model}_{hardware}"
     try:
-        asyncio.run(run_benchmark(endpoint, stack_id, "candidate", sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard))
+        asyncio.run(run_benchmark(endpoint, stack_id, "candidate", sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard, model_name=model))
     except KeyboardInterrupt:
         click.secho("\nBenchmark interrupted", fg="red")
         sys.exit(1)
