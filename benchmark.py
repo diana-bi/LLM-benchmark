@@ -865,7 +865,9 @@ def run_phase(phase: str, endpoint: str, model: str, hardware: str, sweep: bool,
     """
 
     # Auto-generate stack-id from model + hardware (simplifies for user)
-    stack_id = f"{model}_{hardware}"
+    # Sanitize model name: replace slashes (e.g. "Qwen/Qwen2.5-72B") with dashes
+    safe_model = model.replace("/", "-")
+    stack_id = f"{safe_model}_{hardware}"
 
     try:
         asyncio.run(run_benchmark(endpoint, stack_id, phase.lower(), sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard))
@@ -891,7 +893,8 @@ def run_phase(phase: str, endpoint: str, model: str, hardware: str, sweep: bool,
 @click.option("--live", "live_dashboard", is_flag=True, help="Show live Rich dashboard during concurrent phase")
 def baseline_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: bool, rps: Optional[int], requests: Optional[int], plots: bool, live_dashboard: bool):
     """Establish baseline performance (run once, keep forever)."""
-    stack_id = f"{model}_{hardware}"
+    safe_model = model.replace("/", "-")
+    stack_id = f"{safe_model}_{hardware}"
     try:
         asyncio.run(run_benchmark(endpoint, stack_id, "baseline", sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard))
     except KeyboardInterrupt:
@@ -916,7 +919,8 @@ def baseline_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: bo
 @click.option("--live", "live_dashboard", is_flag=True, help="Show live Rich dashboard during concurrent phase")
 def candidate_cmd(endpoint: str, model: str, hardware: str, sweep: bool, fast: bool, rps: Optional[int], requests: Optional[int], plots: bool, live_dashboard: bool):
     """Measure after optimization (auto-compares to baseline)."""
-    stack_id = f"{model}_{hardware}"
+    safe_model = model.replace("/", "-")
+    stack_id = f"{safe_model}_{hardware}"
     try:
         asyncio.run(run_benchmark(endpoint, stack_id, "candidate", sweep, fast, rps, requests, show_plots=plots, show_live=live_dashboard))
     except KeyboardInterrupt:
