@@ -234,10 +234,9 @@ class SweepRunner:
         p95_idx = int(len(sorted_latencies) * 0.95)
         p95_latency = sorted_latencies[p95_idx]
 
-        # Throughput: total output tokens / total time
-        total_tokens = sum(r.output_tokens for r in successful)
+        # Throughput: completed requests / wall-clock time of the stage
         total_time_s = max(r.total_time_ms for r in successful) / 1000.0
-        throughput = total_tokens / total_time_s if total_time_s > 0 else 0
+        throughput = len(successful) / total_time_s if total_time_s > 0 else 0
 
         return SweepStageResult(
             concurrency=concurrency,

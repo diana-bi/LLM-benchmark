@@ -186,12 +186,19 @@ async def run_benchmark(
                     fg="red"
                 )
                 sys.exit(1)
+            # Verify the requested model is actually available on the server
+            available_models = [m.get("id", "") for m in response.json().get("data", [])]
+            if model_name and available_models and model_name not in available_models:
+                click.secho(f"[ERROR] Model '{model_name}' not found on server.", fg="red")
+                click.secho(f"   Available: {', '.join(available_models)}", fg="yellow")
+                sys.exit(1)
         click.secho("[OK] Server is reachable and responding", fg="green")
+    except SystemExit:
+        raise
     except Exception as e:
         click.secho(f"[ERROR] Cannot reach server at {endpoint}", fg="red")
         click.secho(f"   Details: {e}", fg="red")
-        click.secho(f"   Make sure the service is running. Example:", fg="yellow")
-        click.secho(f"   docker-compose up -d", fg="yellow")
+        click.secho(f"   Make sure the service is running at {endpoint}", fg="yellow")
         sys.exit(1)
     print()
 
@@ -232,12 +239,10 @@ async def run_benchmark(
                 click.secho("[WARNING] Comparison metrics may not be valid", fg="yellow")
             print()
         except FileNotFoundError:
-            parts = stack_id.split('_')
-            model = parts[0] if len(parts) > 0 else "your-model"
-            hardware = parts[1] if len(parts) > 1 else "your-hardware"
+            hardware = stack_id.rsplit("_", 1)[-1] if "_" in stack_id else "your-hardware"
             click.secho(f"[ERROR] No baseline found for {stack_id}", fg="red")
             print(f"   Run baseline first:")
-            print(f"   python benchmark.py baseline --endpoint {endpoint} --model {model} --hardware {hardware}")
+            print(f"   python benchmark.py baseline --endpoint {endpoint} --model {model_name} --hardware {hardware}")
             print()
             sys.exit(1)
 
