@@ -554,12 +554,23 @@ async def run_benchmark(
     # Prepare scenario results for baseline manager
     scenario_results = {}
     for scenario_name, scenario_data in results["scenarios"].items():
+        seq_analysis = scenario_data.get("sequential_analysis", {})
+        conc_analysis = scenario_data.get("concurrent_analysis", {})
+        distribution = {**conc_analysis.get("distribution", {})}
+        distribution["is_bimodal"] = conc_analysis.get("bimodal", {}).get("is_bimodal", False)
+        observability = {
+            "drift": seq_analysis.get("drift", {}),
+            "spikes": seq_analysis.get("spikes", {}),
+            "distribution": distribution,
+        }
         scenario_results[scenario_name] = {
             "raw_outputs": scenario_data.get("raw_outputs", []),
             "metrics": scenario_data.get("metrics", {}),
             "concurrent_metrics": scenario_data.get("concurrent_metrics", {}),
+            "concurrent_latencies": scenario_data.get("concurrent_latencies", []),
             "validity": scenario_data.get("validity", {}),
-            "sweep": scenario_data.get("sweep", {})
+            "sweep": scenario_data.get("sweep", {}),
+            "observability": observability,
         }
 
     # Prepare metadata - show defaults + actual values per scenario (reuse from validity gate path)
